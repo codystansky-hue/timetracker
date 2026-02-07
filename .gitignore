@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Database and data
+*.db
+*.csv
+invoices/
+*.pdf
+
+# Windows
+Time Tracker.lnk
+*.ps1
