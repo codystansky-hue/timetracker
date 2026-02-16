@@ -36,6 +36,10 @@ def git_sync(message="Sync database"):
     try:
         # Check if we are in a git repo
         subprocess.run(['git', 'rev-parse', '--is-inside-work-tree'], check=True, capture_output=True, cwd=APP_ROOT)
+        
+        # Pull latest changes first
+        subprocess.run(['git', 'pull', '--rebase'], check=True, cwd=APP_ROOT)
+        
         # Add, commit and push
         subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
         # Check for changes to avoid empty commits
@@ -478,4 +482,7 @@ def generate_invoice(client_id):
     return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{prefix}{invoice_number}.pdf')
 
 if __name__ == '__main__':
+    # Initial sync on startup
+    print("Performing initial git sync...")
+    git_sync("Startup sync")
     app.run(debug=True)

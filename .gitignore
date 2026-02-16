@@ -6,7 +6,6 @@ venv/
 .env
 
 # Database and data
-*.db
 *.csv
 invoices/
 *.pdf
