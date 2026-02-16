@@ -1,5 +1,6 @@
 from flask import Flask, jsonify, request, send_file, render_template
 import sqlite3
+import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
 import csv
@@ -27,6 +28,24 @@ APP_ROOT = Path(__file__).parent
 DB_PATH = APP_ROOT / 'time_tracker.db'
 
 app = Flask(__name__, static_folder=str(APP_ROOT / 'static'), template_folder=str(APP_ROOT / 'templates'))
+
+def git_sync(message="Sync database"):
+    """Sync the database file with the git repository."""
+    if not os.path.exists(DB_PATH):
+        return
+    try:
+        # Check if we are in a git repo
+        subprocess.run(['git', 'rev-parse', '--is-inside-work-tree'], check=True, capture_output=True, cwd=APP_ROOT)
+        # Add, commit and push
+        subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
+        # Check for changes to avoid empty commits
+        status = subprocess.run(['git', 'status', '--porcelain', str(DB_PATH)], check=True, capture_output=True, text=True, cwd=APP_ROOT)
+        if status.stdout.strip():
+            subprocess.run(['git', 'commit', '-m', message], check=True, cwd=APP_ROOT)
+            # Push to origin
+            subprocess.run(['git', 'push'], check=True, cwd=APP_ROOT)
+    except Exception as e:
+        app.logger.error(f"Git sync failed: {e}")
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -59,6 +78,7 @@ def start():
     conn.commit()
     eid = cur.lastrowid
     conn.close()
+    git_sync(f"Start entry: {project} - {description}")
     return jsonify({'id': eid, 'start_ts': start_ts})
 
 @app.route('/api/stop', methods=['POST'])
@@ -83,6 +103,7 @@ def stop():
     cur.execute('UPDATE entries SET end_ts = ?, duration_min = ? WHERE id = ?', (end_ts, duration_min, row['id']))
     conn.commit()
     conn.close()
+    git_sync(f"Stop entry: {row['id']}")
     return jsonify({'id': row['id'], 'end_ts': end_ts, 'duration_min': duration_min})
 
 @app.route('/api/add', methods=['POST'])
@@ -104,6 +125,7 @@ def add_manual():
     conn.commit()
     eid = cur.lastrowid
     conn.close()
+    git_sync(f"Manual entry added: {eid}")
     return jsonify({'id': eid})
 
 @app.route('/api/delete', methods=['POST'])
@@ -117,6 +139,7 @@ def delete():
     cur.execute('DELETE FROM entries WHERE id = ?', (eid,))
     conn.commit()
     conn.close()
+    git_sync(f"Deleted entry: {eid}")
     return jsonify({'deleted': eid})
 
 @app.route('/api/export')
@@ -174,6 +197,7 @@ def edit():
     )
     conn.commit()
     conn.close()
+    git_sync(f"Updated entry: {eid}")
     return jsonify({'id': eid, 'updated': True})
 
 @app.route('/api/projects/summary')
@@ -283,6 +307,7 @@ def update_client(client_id):
     cur.execute(f'UPDATE clients SET {", ".join(updates)} WHERE id = ?', params)
     conn.commit()
     conn.close()
+    git_sync(f"Updated client: {client_id}")
     return jsonify({'updated': client_id})
 
 @app.route('/api/clients/<int:client_id>', methods=['DELETE'])
@@ -292,6 +317,7 @@ def delete_client(client_id):
     cur.execute('DELETE FROM clients WHERE id = ?', (client_id,))
     conn.commit()
     conn.close()
+    git_sync(f"Deleted client: {client_id}")
     return jsonify({'deleted': client_id})
 
 @app.route('/generate_invoice/<int:client_id>')
@@ -347,6 +373,8 @@ def generate_invoice(client_id):
                     (invoice_number, client_id, invoice_date.isoformat(), due_date.isoformat(), total_hours, total_amount))
         conn.commit()
     conn.close()
+    if not draft:
+        git_sync(f"Generated invoice: {invoice_number}")
 
     # Create invoices folder
     invoices_dir = Path('invoices')
