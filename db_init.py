@@ -52,6 +52,29 @@ def init_db():
         FOREIGN KEY (client_id) REFERENCES clients (id)
     )
     ''')
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS expenses (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id    INTEGER,
+        project      TEXT,
+        vendor       TEXT NOT NULL,
+        amount       REAL NOT NULL,
+        expense_date TEXT NOT NULL,
+        category     TEXT,
+        description  TEXT,
+        reimbursable INTEGER NOT NULL DEFAULT 1,
+        source       TEXT,
+        receipt_path TEXT,
+        invoice_id   INTEGER,
+        created_at   TEXT NOT NULL,
+        FOREIGN KEY (client_id) REFERENCES clients(id),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id)
+    )
+    ''')
+    try:
+        cur.execute('ALTER TABLE invoices ADD COLUMN expense_total REAL DEFAULT 0.0')
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
 

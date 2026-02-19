@@ -5,49 +5,197 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Time Tracker</title>
     <link rel="stylesheet" href="/static/style.css" />
+    <link rel="manifest" href="/static/manifest.json" />
+    <link rel="apple-touch-icon" href="/static/icon-192.png" />
+    <meta name="theme-color" content="#1a1b26" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Time Tracker" />
   </head>
   <body>
+    <nav class="topnav">
+      <div class="nav-brand">Time Tracker</div>
+      <div class="nav-links">
+        <button class="nav-btn active" data-section="tracking">Time Tracking</button>
+        <button class="nav-btn" data-section="expenses">Expenses</button>
+        <button class="nav-btn" data-section="settings">Settings</button>
+      </div>
+    </nav>
+
     <div class="container">
-      <h1>Time Tracker</h1>
 
-      <div class="controls">
-        <select id="clientSelect">
-          <option value="">Select Client</option>
-        </select>
-        <input id="project" placeholder="Project name" />
-        <input id="description" placeholder="Description" />
-        <button id="startBtn">Start</button>
-        <button id="stopBtn">Stop</button>
-        <button id="exportBtn">Export CSV</button>
+      <!-- ── Time Tracking ──────────────────────────────────────── -->
+      <div id="section-tracking" class="section">
+        <div class="controls">
+          <select id="clientSelect"><option value="">Select Client</option></select>
+          <input id="project" placeholder="Project name" />
+          <input id="description" placeholder="Description" />
+          <button id="startBtn">Start</button>
+          <button id="stopBtn">Stop</button>
+          <button id="exportBtn">Export CSV</button>
+        </div>
+
+        <div class="section-header">
+          <h2>Entries</h2>
+          <div class="pagination-bar">
+            <button id="prevPage">← Prev</button>
+            <span id="pageInfo"></span>
+            <button id="nextPage">Next →</button>
+          </div>
+        </div>
+        <table id="entriesTable">
+          <thead><tr><th>ID</th><th>Client</th><th>Project</th><th>Description</th><th>Start</th><th>End</th><th>Minutes</th><th>Status</th><th>Action</th></tr></thead>
+          <tbody></tbody>
+        </table>
+
+        <h2>Project Summary</h2>
+        <table id="projectsTable">
+          <thead><tr><th>Project</th><th>Total Hours</th><th>Billed Value</th><th>Target Hours</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
 
-      <h2>Entries</h2>
-      <table id="entriesTable">
-        <thead><tr><th>ID</th><th>Client</th><th>Project</th><th>Description</th><th>Start</th><th>End</th><th>Minutes</th><th>Status</th><th>Action</th></tr></thead>
-        <tbody>
-        </tbody>
-      </table>
+      <!-- ── Expenses ───────────────────────────────────────────── -->
+      <div id="section-expenses" class="section" style="display:none">
+        <h2>Expenses</h2>
 
-      <h2>Project Summary</h2>
-      <table id="projectsTable">
-        <thead><tr><th>Project</th><th>Total Hours</th><th>Billed Value</th><th>Target Hours</th></tr></thead>
-        <tbody></tbody>
-      </table>
+        <div class="expense-tabs">
+          <button class="tab-btn active" data-tab="manual">Manual Entry</button>
+          <button class="tab-btn" data-tab="receipt">Receipt (OCR)</button>
+          <button class="tab-btn" data-tab="email">Email Confirmation</button>
+        </div>
 
-      <h2>Clients</h2>
-      <div id="addClientForm">
-        <input id="clientName" placeholder="Client Name" />
-        <input id="clientEmail" placeholder="Email" />
-        <input id="clientPhone" placeholder="Phone" />
-        <input id="clientAddress" placeholder="Address" />
-        <input id="clientRate" placeholder="Hourly Rate" type="number" step="0.01" />
-        <button id="addClientBtn">Add Client</button>
+        <div id="expenseControls">
+          <div class="tab-panel" id="tab-manual">
+            <select id="expClientSelect"><option value="">No Client</option></select>
+            <input id="expProject" placeholder="Project" />
+            <input id="expVendor" placeholder="Vendor *" />
+            <input id="expAmount" type="number" step="0.01" placeholder="Amount *" />
+            <input id="expDate" type="date" />
+            <select id="expCategory">
+              <option value="other">Other</option>
+              <option value="travel">Travel</option>
+              <option value="hotel">Hotel</option>
+              <option value="meal">Meal</option>
+              <option value="office">Office</option>
+            </select>
+            <input id="expDescription" placeholder="Description" />
+            <label class="inline-check"><input type="checkbox" id="expReimbursable" checked /> Reimbursable</label>
+            <button id="addExpenseBtn">Add Expense</button>
+          </div>
+
+          <div class="tab-panel" id="tab-receipt" style="display:none">
+            <input type="file" id="receiptFile" accept="image/*,.pdf" />
+            <button id="uploadReceiptBtn">Upload &amp; Parse</button>
+            <span id="receiptStatus" style="color:var(--text-muted);font-size:0.9rem"></span>
+          </div>
+
+          <div class="tab-panel" id="tab-email" style="display:none; flex-direction:column">
+            <textarea id="emailText" placeholder="Paste flight or hotel confirmation email here..."></textarea>
+            <div style="margin-top:8px">
+              <button id="parseEmailBtn">Parse Email</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Expense review modal -->
+        <div class="modal-overlay" id="expenseModal" style="display:none">
+          <div class="modal-box">
+            <h3>Review Expense <span id="modalQueueLabel" style="font-size:0.8rem;color:var(--text-muted);font-weight:400"></span></h3>
+            <div class="modal-fields">
+              <label>Vendor *<input id="mVendor" placeholder="Vendor" /></label>
+              <label>Amount *<input id="mAmount" type="number" step="0.01" placeholder="0.00" /></label>
+              <label>Date *<input id="mDate" type="date" /></label>
+              <label>End Date<input id="mEndDate" type="date" /></label>
+              <label>Category
+                <select id="mCategory">
+                  <option value="other">Other</option>
+                  <option value="travel">Travel</option>
+                  <option value="hotel">Hotel</option>
+                  <option value="meal">Meal</option>
+                  <option value="office">Office</option>
+                </select>
+                <span id="categoryHint" style="font-size:0.75rem;color:var(--success);margin-top:2px"></span>
+              </label>
+              <label>Client
+                <select id="mClientSelect"><option value="">No Client</option></select>
+              </label>
+              <label>Project<input id="mProject" placeholder="Project" /></label>
+              <label>Description<input id="mDescription" placeholder="Description" /></label>
+              <label class="modal-check"><input type="checkbox" id="mReimbursable" checked /> Reimbursable</label>
+            </div>
+            <div id="rawTextBlock" style="display:none">
+              <details>
+                <summary style="cursor:pointer;color:var(--text-muted);font-size:0.85rem">Raw OCR / Email text</summary>
+                <pre class="raw-text-box" id="rawTextContent"></pre>
+              </details>
+            </div>
+            <div class="modal-actions">
+              <button id="modalSaveBtn">Save</button>
+              <button id="modalCancelBtn" class="btn-secondary">Cancel</button>
+            </div>
+          </div>
+        </div>
+
+        <table id="expensesTable">
+          <thead>
+            <tr>
+              <th>ID</th><th>Date</th><th>Vendor</th><th>Amount</th>
+              <th>Category</th><th>Client</th><th>Project</th>
+              <th>Reimb?</th><th>Source</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
       </div>
-      <table id="clientsTable">
-        <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Address</th><th>Rate</th><th>Actions</th></tr></thead>
-        <tbody></tbody>
-      </table>
+
+      <!-- ── Settings ───────────────────────────────────────────── -->
+      <div id="section-settings" class="section" style="display:none">
+        <div class="qr-block">
+          <div>
+            <h2 style="margin-top:0">Mobile Access</h2>
+            <p style="color:var(--text-muted);margin:0 0 8px">Scan with your iPhone to open the app, or install it as a PWA from Safari.</p>
+            <p id="qrUrl" style="color:var(--accent);font-size:0.9rem;margin:0"></p>
+          </div>
+          <img id="qrImg" src="/qr.png" alt="QR code" style="width:140px;height:140px;border-radius:8px" />
+        </div>
+
+        <h2>Clients</h2>
+        <div id="addClientForm">
+          <input id="clientName" placeholder="Client Name" />
+          <input id="clientEmail" placeholder="Email" />
+          <input id="clientPhone" placeholder="Phone" />
+          <input id="clientAddress" placeholder="Address" />
+          <input id="clientRate" placeholder="Hourly Rate" type="number" step="0.01" />
+          <button id="addClientBtn">Add Client</button>
+        </div>
+        <table id="clientsTable">
+          <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Phone</th><th>Address</th><th>Rate</th><th>Actions</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
     </div>
+
+    <!-- Invoice date-range modal (shared, lives outside sections) -->
+    <div class="modal-overlay" id="invoiceModal" style="display:none">
+      <div class="modal-box" style="max-width:400px">
+        <h3>Generate Invoice</h3>
+        <p id="invoiceClientName" style="color:var(--text-muted);margin-top:0;margin-bottom:16px"></p>
+        <div class="modal-fields">
+          <label>Start Date<input type="date" id="invStartDate" /></label>
+          <label>End Date<input type="date" id="invEndDate" /></label>
+        </div>
+        <label class="modal-check" style="margin-bottom:16px">
+          <input type="checkbox" id="invDraft" /> Draft only (not saved to DB)
+        </label>
+        <div class="modal-actions">
+          <button id="invGenerateBtn">Generate PDF</button>
+          <button class="btn-secondary" id="invCancelBtn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <script src="/static/app.js"></script>
   </body>
 </html>

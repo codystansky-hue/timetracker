@@ -9,6 +9,7 @@ venv/
 *.csv
 invoices/
 *.pdf
+uploads/
 
 # Windows
 Time Tracker.lnk

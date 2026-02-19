@@ -19,9 +19,105 @@ body {
     margin: 0;
 }
 
+/* ── Top navigation ──────────────────────────────────────────────────────── */
+
+.topnav {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 0 28px;
+    height: 52px;
+    background: var(--panel);
+    border-bottom: 1px solid var(--border);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+}
+
+.nav-brand {
+    font-size: 1.05rem;
+    font-weight: 700;
+    color: var(--accent);
+    margin-right: 20px;
+    letter-spacing: 0.02em;
+}
+
+.nav-links {
+    display: flex;
+    gap: 2px;
+}
+
+.nav-btn {
+    padding: 6px 18px;
+    background: transparent;
+    color: var(--text-muted);
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.9rem;
+    transition: color 0.15s, background 0.15s;
+}
+
+.nav-btn:hover:not(.active) {
+    color: var(--fg);
+    background: var(--border);
+    transform: none;
+    opacity: 1;
+}
+
+.nav-btn.active {
+    color: var(--accent);
+    background: rgba(122, 162, 247, 0.12);
+}
+
+/* ── Pagination ──────────────────────────────────────────────────────────── */
+
+.section-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.section-header h2 {
+    margin: 0;
+}
+
+.pagination-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.pagination-bar button {
+    padding: 5px 14px;
+    font-size: 0.85rem;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+}
+
+.pagination-bar button:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    transform: none;
+}
+
+#pageInfo {
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    min-width: 90px;
+    text-align: center;
+}
+
 .container {
     max-width: 1100px;
-    margin: 24px auto;
+    margin: 20px auto;
     background: var(--panel);
     padding: 24px;
     border-radius: 12px;
@@ -29,7 +125,6 @@ body {
     border: 1px solid var(--border);
 }
 
-h1,
 h2 {
     color: var(--accent);
     font-weight: 500;
@@ -162,4 +257,181 @@ td {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--text-muted);
+}
+
+/* ── Expense section ─────────────────────────────────────────────────────── */
+
+.expense-tabs {
+    display: flex;
+    gap: 4px;
+    margin-bottom: 0;
+}
+
+.tab-btn {
+    padding: 8px 18px;
+    background: var(--bg);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-bottom: none;
+    border-radius: 6px 6px 0 0;
+    cursor: pointer;
+    font-weight: 500;
+    font-size: 0.9rem;
+    transition: color 0.15s;
+}
+
+.tab-btn.active {
+    background: var(--panel);
+    color: var(--accent);
+    border-color: var(--border);
+}
+
+.tab-btn:hover:not(.active) {
+    color: var(--fg);
+    transform: none;
+    opacity: 1;
+}
+
+#expenseControls {
+    background: var(--bg);
+    padding: 16px;
+    border-radius: 0 6px 6px 6px;
+    border: 1px solid var(--border);
+    margin-bottom: 16px;
+}
+
+.tab-panel {
+    display: flex;
+    gap: 12px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+}
+
+.inline-check {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--fg);
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
+#emailText {
+    width: 100%;
+    min-height: 130px;
+    padding: 10px 14px;
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--fg);
+    resize: vertical;
+    font-family: inherit;
+    font-size: 0.9rem;
+    box-sizing: border-box;
+}
+
+/* ── Modal ───────────────────────────────────────────────────────────────── */
+
+.modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal-box {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    max-width: 580px;
+    width: 92%;
+    max-height: 85vh;
+    overflow-y: auto;
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+}
+
+.modal-box h3 {
+    color: var(--accent);
+    margin-top: 0;
+    margin-bottom: 16px;
+}
+
+.modal-fields {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.modal-fields label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 0.82rem;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.modal-fields label input,
+.modal-fields label select {
+    font-size: 0.9rem;
+    text-transform: none;
+}
+
+.modal-check {
+    grid-column: span 2;
+    flex-direction: row !important;
+    align-items: center;
+    gap: 8px;
+    color: var(--fg) !important;
+    text-transform: none !important;
+    font-size: 0.9rem !important;
+    letter-spacing: 0 !important;
+}
+
+.modal-actions {
+    display: flex;
+    gap: 12px;
+    margin-top: 16px;
+    justify-content: flex-end;
+}
+
+.btn-secondary {
+    background: var(--border);
+    color: var(--fg);
+}
+
+.btn-secondary:hover {
+    background: var(--text-muted);
+    opacity: 1;
+}
+
+.qr-block {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    margin-bottom: 24px;
+    gap: 16px;
+}
+
+.raw-text-box {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px;
+    font-size: 0.78rem;
+    max-height: 120px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    color: var(--text-muted);
+    margin-top: 8px;
 }
