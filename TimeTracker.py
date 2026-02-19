@@ -9,6 +9,7 @@ import os
 import glob
 import re
 import uuid
+from collections import defaultdict
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -676,19 +677,21 @@ def _preprocess_for_ocr(pil_img):
 def _find_amount(text):
     """
     Extract the most likely total amount from receipt text.
-    Priority: lines near 'total' keywords → bottom third of receipt → any amount.
+
+    Strategy:
+    - Collect candidates from lines matching total-related keywords, grouped
+      by priority: HIGH (grand total / amount due) > MED (total) > LOW (subtotal).
+    - Skip lines that are clearly payment lines (cash tendered, change, tip).
+    - Within each priority group take the LAST match (lowest on the receipt =
+      most likely to be the grand total, not an intermediate subtotal).
+    - Fall back to the bottom third, then any amount.
     """
     lines = text.splitlines()
     n     = len(lines)
 
-    total_kws = ['total', 'amount due', 'balance due', 'grand total',
-                 'subtotal', 'you paid', 'your total', 'order total',
-                 'amount', 'due', 'charged', 'sale']
-
     def _amounts_in(line):
-        """Parse dollar amounts, including OCR artefacts like '27 .05' or '$27. 05'."""
+        """Parse dollar amounts, including OCR artefacts like '27 .05'."""
         out = []
-        # Standard: $12.34 or 12.34
         for m in re.finditer(r'\$?\s*([\d,]+\.\d{2})', line):
             try:
                 v = float(m.group(1).replace(',', ''))
@@ -696,8 +699,6 @@ def _find_amount(text):
                     out.append(v)
             except ValueError:
                 pass
-        # OCR artefact: digits, optional space, period, optional space, 2 digits
-        # e.g. "27 .05"  or  "$22. 05"
         for m in re.finditer(r'\$?\s*([\d,]+)\s*\.\s*(\d{2})\b', line):
             try:
                 v = float(m.group(1).replace(',', '') + '.' + m.group(2))
@@ -705,23 +706,64 @@ def _find_amount(text):
                     out.append(v)
             except ValueError:
                 pass
-        return list(dict.fromkeys(out))  # deduplicate preserving order
+        return list(dict.fromkeys(out))
 
-    # Pass 1: look for amounts on lines that mention a total keyword
+    def _amount_for_line(i):
+        """Return the amount on line i, or line i+1 if line i has none."""
+        a = _amounts_in(lines[i])
+        if a:
+            return max(a)
+        if i + 1 < n:
+            a = _amounts_in(lines[i + 1])
+            if a:
+                return max(a)
+        return None
+
+    # Keywords that indicate a payment LINE, not the expense total
+    SKIP_KWS = ['change due', 'change', 'cash tendered', 'cash paid',
+                'tip', 'gratuity', 'you saved', 'savings', 'discount',
+                'coupon', 'points redeemed']
+
+    # HIGH: definitively the grand total
+    HIGH_KWS = ['grand total', 'total amount', 'amount due', 'balance due',
+                'your total', 'order total', 'total charges', 'you paid',
+                'total due']
+    # MED: plain "total" (may be a subtotal on some receipts, so prefer HIGH)
+    MED_KWS  = ['total']
+    # LOW: subtotals / sale amounts
+    LOW_KWS  = ['subtotal', 'sub total', 'amount charged', 'sale amount', 'sale']
+
+    high_vals, med_vals, low_vals = [], [], []
+
     for i, line in enumerate(lines):
-        if any(kw in line.lower() for kw in total_kws):
-            # check this line and the next two (amount may be on the next line)
-            window = lines[i:min(n, i + 3)]
-            found  = [v for ln in window for v in _amounts_in(ln)]
-            if found:
-                return max(found)
+        ll = line.lower()
+        # Skip payment / change lines
+        if any(kw in ll for kw in SKIP_KWS):
+            continue
+        val = _amount_for_line(i)
+        if val is None:
+            continue
+        if any(kw in ll for kw in HIGH_KWS):
+            high_vals.append(val)
+        elif any(kw in ll for kw in MED_KWS):
+            med_vals.append(val)
+        elif any(kw in ll for kw in LOW_KWS):
+            low_vals.append(val)
 
-    # Pass 2: bottom third of the receipt (totals live near the end)
+    # Last entry = closest to bottom = grand total
+    if high_vals:
+        return high_vals[-1]
+    if med_vals:
+        return med_vals[-1]
+    if low_vals:
+        return low_vals[-1]
+
+    # Fall back: bottom third of receipt
     bottom = [v for ln in lines[n * 2 // 3:] for v in _amounts_in(ln)]
     if bottom:
         return max(bottom)
 
-    # Pass 3: any two-decimal amount in the text
+    # Last resort: any two-decimal amount
     all_vals = [v for ln in lines for v in _amounts_in(ln)]
     return max(all_vals) if all_vals else 0.0
 
@@ -731,100 +773,236 @@ def _normalize_date(date_str):
     # Strip trailing time portions before parsing (e.g. "3 Feb'26 7:58 AM")
     date_str = re.sub(r'\s+\d{1,2}:\d{2}(\s*(AM|PM))?$', '', date_str.strip(),
                       flags=re.IGNORECASE)
+    date_str = date_str.strip()
     formats = [
         '%Y-%m-%d', '%m/%d/%Y', '%m/%d/%y',
         '%B %d, %Y', '%b %d, %Y', '%B %d %Y', '%b %d %Y',
-        '%d %B %Y', '%d %b %Y', '%Y/%m/%d', '%m-%d-%Y',
-        # Receipt printer formats: "3 Feb'26", "12 Feb'26" (2-digit year with apostrophe)
+        '%d %B %Y', '%d %b %Y', '%Y/%m/%d', '%m-%d-%Y', '%m-%d-%y',
+        # Dot-separated: US "02.18.2026" and short "02.18.26"
+        '%m.%d.%Y', '%m.%d.%y',
+        # Receipt printer formats: "3 Feb'26", "12 Feb'26"
         "%d %b'%y", "%d %B'%y",
+        # Day-first variants common in hotel folios: "18-Feb-2026"
+        '%d-%b-%Y', '%d-%B-%Y',
+        # Written-out month-first without comma: "February 18 2026"
+        '%B %d %Y', '%b %d %Y',
     ]
     for fmt in formats:
         try:
-            return datetime.strptime(date_str.strip(), fmt).strftime('%Y-%m-%d')
+            return datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
         except ValueError:
             pass
     return None
 
 
+def _is_plausible_receipt_date(date_str):
+    """True if date is within the last 4 years and not in the future (>1 yr)."""
+    try:
+        d = datetime.strptime(date_str, '%Y-%m-%d')
+        now = datetime.now()
+        return (now - timedelta(days=4 * 365)) <= d <= (now + timedelta(days=365))
+    except Exception:
+        return False
+
+
 def _find_date(text):
-    """Find the first recognizable date in text, return YYYY-MM-DD or today."""
+    """Find the most plausible transaction date, return YYYY-MM-DD or today.
+
+    Collects ALL date-like strings in the text, normalises each, then returns
+    the first one that falls in a plausible range (last 4 years).  This avoids
+    picking up card-expiry years, future booking dates typed in error, etc.
+    """
     patterns = [
+        # ISO: 2026-02-18
         r'\b(\d{4}-\d{2}-\d{2})\b',
+        # US slash: 02/18/2026 or 02/18/26
         r'\b(\d{1,2}/\d{1,2}/\d{4})\b',
         r'\b(\d{1,2}/\d{1,2}/\d{2})\b',
+        # US dash: 02-18-2026 or 02-18-26
+        r'\b(\d{1,2}-\d{1,2}-\d{4})\b',
+        r'\b(\d{1,2}-\d{1,2}-\d{2})\b',
+        # US dot: 02.18.2026 or 02.18.26
+        r'\b(\d{1,2}\.\d{1,2}\.\d{4})\b',
+        r'\b(\d{1,2}\.\d{1,2}\.\d{2})\b',
+        # "Feb 18, 2026" or "February 18 2026"
         r'\b((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4})\b',
-        r'\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{4})\b',
-        # Compact receipt format: "3 Feb'26" or "12 Feb'26 7:58 AM"
+        # "18 Feb 2026" or "18-Feb-2026"
+        r'\b(\d{1,2}[\s\-](?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?[\s\-]\d{4})\b',
+        # Compact receipt: "3 Feb'26" or "12 Feb'26 7:58 AM"
         r"\b(\d{1,2}\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*'?\d{2}(?:\s+\d{1,2}:\d{2}(?:\s*[AP]M)?)?)\b",
+        # Compact YYYYMMDD (e.g. some parking kiosk tickets)
+        r'\b(2\d{7})\b',
     ]
+    candidates = []
     for pattern in patterns:
-        m = re.search(pattern, text, re.IGNORECASE)
-        if m:
-            normalized = _normalize_date(m.group(1))
+        for m in re.finditer(pattern, text, re.IGNORECASE):
+            raw = m.group(1)
+            # Handle compact YYYYMMDD
+            if re.match(r'^2\d{7}$', raw):
+                try:
+                    normalized = datetime.strptime(raw, '%Y%m%d').strftime('%Y-%m-%d')
+                except ValueError:
+                    continue
+            else:
+                normalized = _normalize_date(raw)
             if normalized:
-                return normalized
-    return datetime.now().strftime('%Y-%m-%d')
+                candidates.append(normalized)
+
+    if not candidates:
+        return datetime.now().strftime('%Y-%m-%d')
+
+    # Prefer plausible dates (within the last 4 years); fall back to first found
+    plausible = [d for d in candidates if _is_plausible_receipt_date(d)]
+    return plausible[0] if plausible else candidates[0]
 
 
 def _find_vendor(text):
-    """Return the most likely vendor name from receipt text.
+    """Return the most likely vendor name using a scored-candidate approach.
 
-    Strategy:
-    1. Scan the first 25 lines for a clean business-name line, skipping POS
-       system metadata (Order#, Station#, Server:, etc.).
-    2. Fall back to any remaining non-numeric, non-metadata line.
+    Filters obvious noise (POS codes, addresses, prices, URLs, phone numbers,
+    city/state lines) from the first 40 lines, then scores remaining candidates
+    by capitalisation, word count, brand-map membership, and position.
     """
-    # Lines that are POS metadata, not the business name
-    skip_re = re.compile(
+    # POS metadata lines (keywords that appear at the start of noise lines)
+    _SKIP_STARTS = re.compile(
         r'^(?:'
-        r'date|time|receipt|invoice|tax|total|subtotal|amount|thank|welcome|'
-        r'order\s*#|station\s*#|server\s*:|table\s*|check\s*[:#]|'
-        r'transaction|reference\s*#|auth|approval|entry\s*method|terminal\s*id|'
+        r'date[\s:]|time[\s:]|receipt|invoice|tax\b|total|subtotal|amount|'
+        r'thank|welcome|sorry|please|call us|visit us|follow us|'
+        r'order\s*[:#]|station\s*[:#]|server\s*[:#]|table\s*[:#]|'
+        r'check\s*[:#]|ticket\s*[:#]|seat\s*[:#]|'
+        r'transaction|reference\s*[:#]|auth|approval|entry\s*method|'
+        r'terminal\s*(id)?[:#]?|merchant\s*(id)?[:#]?|mid[:\s]|tid[:\s]|'
         r'paid\s*with|visa|mastercard|amex|american\s*express|discover|'
-        r'your\s*server|cashier|clerk|'
-        r'subtotal|balance|change|tip|gratuity|'
-        r'suite\s*\d|floor\s*\d|p\.?o\.\?\s*box|'
-        r'to\s*go|for\s*here|dine\s*in|take\s*out|carry\s*out|'
-        # Airport/location descriptions: "Los Angeles LAX/Hawthorne", "JFK Terminal 4"
-        r'(?:los\s+angeles|new\s+york|san\s+francisco|chicago|dallas|miami|'
-        r'seattle|boston|denver|phoenix|atlanta|houston|las\s+vegas|'
-        r'lax|jfk|ord|dfw|sfo|atl|bos|den|phx|mia|sea)\b|'
-        r'\*+|={3,}|-{3,}'
+        r'debit|credit card|card\s*type|card\s*number|acct\b|'
+        r'your\s*server|cashier|clerk|operator|host\b|'
+        r'balance|change\s*due|change\b|tip\b|gratuity|'
+        r'suite\s*\d|floor\s*\d|p\.?o\.?\s*box|'
+        r'to\s*go|for\s*here|dine\s*in|take\s*out|carry\s*out|pick.?up|'
+        r'member|loyalty|rewards|points\b|savings|coupon|promo|'
+        r'\*+|={3,}|-{4,}|_{4,}'
         r')',
         re.IGNORECASE,
     )
-    # Any "Code# XXXX" line — catches "Order# 7069351", "Station# POSZ",
-    # and OCR variants like "otation# POSZ" (missing first letters)
-    pos_code_re = re.compile(r'\w+\s*#\s*\w', re.IGNORECASE)
-    # Lines that look like addresses (digits + direction/street keywords)
-    addr_re = re.compile(
-        r'^\d+\s+\w+\s+(?:st|ave|blvd|dr|rd|ln|way|pkwy|suite|ste)\b',
+    # "Code# XXXX" — catches "Order# 7069", "Station# POSZ", "otation# POSZ"
+    _POS_CODE    = re.compile(r'\w+\s*#\s*\w', re.IGNORECASE)
+    # Address: starts with house number + street type
+    _ADDR        = re.compile(
+        r'^\d+\s+\w[\w\s]*\s+(?:st|ave|blvd|dr|rd|ln|way|pkwy|ste|hwy|'
+        r'route|court|ct|pl|place|terr|ter|cir|loop|trail|trl)\b',
         re.IGNORECASE,
     )
-    # Lines that are just numbers / punctuation
-    numeric_re = re.compile(r'^[\d\s\-\+\.\,\$\#\*\/\\()]+$')
-    # Lines that contain a price — these are item lines, not a vendor name
-    price_re = re.compile(r'\$\s*\d+\.\d{2}')
+    # Pure numbers / symbols
+    _NUMERIC     = re.compile(r'^[\d\s\-\+\.\,\$\#\*\/\\()_=]+$')
+    # Price on the line → item or total row, not a name
+    _PRICE       = re.compile(r'\$\s*\d+\.\d{2}|\d+\.\d{2}\s*$')
+    # "City, ST 12345" or "City ST 12345"
+    _CITY_STATE  = re.compile(r'^[A-Za-z\s\.]+,?\s+[A-Z]{2}\s+\d{5}')
+    # Phone number
+    _PHONE       = re.compile(r'^\+?1?\s*\(?\d{3}\)?[\s\-\.]\d{3}[\s\-\.]\d{4}')
+    # URL or e-mail
+    _URL         = re.compile(r'(?:www\.|https?://|\.(com|net|org|io|co|us)\b)',
+                              re.IGNORECASE)
+    _EMAIL       = re.compile(r'\S+@\S+\.\S+')
+    # Item line: description  TAB/many-spaces  amount (right-aligned layout)
+    _ITEM_LINE   = re.compile(r'^.{4,}\s{3,}\d[\d,]*\.\d{2}\s*$')
+    # Separator / decoration lines
+    _SEPARATOR   = re.compile(r'^[\-=\*\.~_]{3,}$')
 
-    for line in text.splitlines():
+    candidates = []
+    for line in text.splitlines()[:45]:
         line = line.strip()
-        if len(line) < 3:
+        if len(line) < 3 or len(line) > 80:
             continue
-        if numeric_re.match(line):
+        if _SEPARATOR.match(line):
             continue
-        if skip_re.match(line):
+        if _NUMERIC.match(line):
             continue
-        if pos_code_re.search(line):
+        if _SKIP_STARTS.match(line):
             continue
-        if addr_re.match(line):
+        pos_hit = _POS_CODE.search(line)
+        if pos_hit:
+            # Extract whatever precedes the '#' (e.g. "STARBUCKS" from "STARBUCKS #12345")
+            hash_pos = line.find('#', pos_hit.start())
+            before = line[:hash_pos].strip() if hash_pos >= 0 else ''
+            # Only keep it if it isn't itself a generic POS keyword like "Order"
+            _POS_KW = re.compile(
+                r'^(?:order|station|server|table|check|ticket|seat|ref|'
+                r'trans|auth|terminal|item|sku|upc|acct|account|lot)\s*$',
+                re.IGNORECASE,
+            )
+            if (len(before) >= 3 and re.search(r'[A-Za-z]{2}', before)
+                    and not _POS_KW.match(before)):
+                candidates.append(before)
             continue
-        if price_re.search(line):
+        if _ADDR.match(line):
             continue
-        # Must contain at least two letters in a row to be a real name
+        if _PRICE.search(line):
+            continue
+        if _CITY_STATE.match(line):
+            continue
+        if _PHONE.match(line):
+            continue
+        if _URL.search(line):
+            continue
+        if _EMAIL.search(line):
+            continue
+        if _ITEM_LINE.match(line):
+            continue
         if not re.search(r'[A-Za-z]{2}', line):
             continue
-        return line[:80]
-    return 'Unknown Vendor'
+        candidates.append(line)
+
+    if not candidates:
+        return 'Unknown Vendor'
+
+    # Score each candidate; higher score = more likely to be the business name
+    def _score(line, pos):
+        s = 0
+        words = line.split()
+        alpha_words = [w for w in words if w and w[0].isalpha()]
+
+        # Known brand is the strongest signal
+        if _find_vendor_category(line):
+            s += 25
+
+        # All words title-case or ALL-CAPS → looks like a header / business name
+        if alpha_words and all(w[0].isupper() for w in alpha_words):
+            s += 4
+
+        # Multi-word names are more credible than single tokens
+        n_alpha = len(alpha_words)
+        if n_alpha >= 2:
+            s += 3
+        if n_alpha >= 3:
+            s += 1
+
+        # Digits mixed into the line → likely a code, item, or address
+        if re.search(r'\d', line):
+            s -= 3
+
+        # Very long lines are more likely descriptions than business names
+        if len(line) > 45:
+            s -= 2
+
+        # Proximity to the top of the receipt (business names come first)
+        s += max(0, 5 - pos)
+
+        # Common prepositions/articles suggest a phrase, not a proper name
+        if re.search(r'\b(?:for|the|and|our|your|we|you|at|in|on|of|a |is |are )\b',
+                     line, re.IGNORECASE):
+            s -= 2
+
+        # All-lowercase line → usually body text
+        if line == line.lower() and len(line) > 8:
+            s -= 3
+
+        return s
+
+    scored = sorted(
+        [(_score(c, i), i, c) for i, c in enumerate(candidates)],
+        key=lambda x: (-x[0], x[1]),
+    )
+    return scored[0][2][:80]
 
 
 # ---------------------------------------------------------------------------
@@ -832,20 +1010,40 @@ def _find_vendor(text):
 # ---------------------------------------------------------------------------
 _BRAND_MAP = {
     'travel': [
-        'uber', 'lyft', 'taxi', 'grab', 'curb', 'gett', 'waymo',
+        # Rideshare / taxi
+        'uber', 'lyft', 'taxi', 'grab', 'curb', 'gett', 'waymo', 'via ride',
+        # US airlines
         'american airlines', 'delta airlines', 'delta air', 'united airlines',
         'southwest airlines', 'jetblue', 'alaska airlines', 'spirit airlines',
         'frontier airlines', 'allegiant', 'sun country', 'breeze airways',
+        'hawaiian airlines', 'avelo airlines',
+        # International airlines
         'air canada', 'westjet', 'british airways', 'lufthansa', 'emirates',
         'qatar airways', 'air france', 'klm', 'ryanair', 'easyjet',
+        'singapore airlines', 'cathay pacific', 'ana ', 'japan airlines',
+        # Ground transport
         'amtrak', 'via rail', 'greyhound', 'megabus', 'flixbus',
+        'metro', 'metrolink', 'metro rail', 'metro bus', 'big blue bus',
+        'dash bus', 'culver citybus', 'torrance transit', 'foothill transit',
+        # Car rental
         'enterprise', 'hertz', 'avis', 'budget rent', 'national car',
         'alamo', 'dollar rent', 'thrifty', 'sixt', 'zipcar', 'turo',
+        'fox rent', 'payless car',
+        # Parking
         'parkwhiz', 'spothero', 'parking', 'ez pass', 'fastrak',
+        'lax parking', 'lawa parking', 'los angeles world airports',
+        'sp+ parking', 'sp plus', 'ggp parking', 'park24', 'parkway',
+        'parkmobile', 'passport parking', 'ace parking', 'central parking',
+        'imperial parking', 'propark', 'republic parking',
+        'airport parking', 'economy parking', 'valet parking',
+        'parking garage', 'parking structure',
+        # Fuel / road
         'mileage', 'toll', 'fuel', 'gasoline', 'shell', 'bp ', 'chevron',
-        'exxon', 'mobil', 'sunoco', 'wawa',
+        'exxon', 'mobil', 'sunoco', 'wawa', 'arco', '76 gas', 'circle k',
+        'pilot travel', 'love\'s travel', 'ta travel', 'speedway',
     ],
     'hotel': [
+        # Major chains
         'marriott', 'hilton', 'hyatt', 'ihg', 'wyndham', 'accor',
         'best western', 'holiday inn', 'sheraton', 'westin', 'w hotel',
         'courtyard', 'hampton inn', 'doubletree', 'embassy suites',
@@ -855,34 +1053,59 @@ _BRAND_MAP = {
         'radisson', 'ramada', 'days inn', 'super 8', 'motel 6',
         'red roof', 'la quinta', 'comfort inn', 'quality inn',
         'sleep inn', 'extended stay', 'residence inn', 'homewood suites',
-        'airbnb', 'vrbo', 'homeaway',
+        # Boutique / short-term
+        'airbnb', 'vrbo', 'homeaway', 'sonder', 'vacasa',
+        # LA-area hotels
+        'loews hollywood', 'the standard', 'ace hotel', 'line hotel',
+        'nomad hotel', 'chateau marmont', 'beverly hills hotel',
+        'beverly wilshire', 'hotel bel-air', 'sunset tower', 'mama shelter',
+        'dream hollywood', 'mondrian', 'soho house',
     ],
     'meal': [
+        # Burgers / fast food
         "mcdonald's", 'mcdonalds', 'burger king', "wendy's", 'wendys',
         'five guys', 'shake shack', 'in-n-out', 'in n out', 'whataburger',
-        'sonic drive', 'hardees', "carl's jr", 'jack in the box', 'smashburger',
+        'sonic drive', 'hardees', "carl's jr", 'carls jr', 'jack in the box',
+        'smashburger', 'fatburger', 'habit burger', 'the habit',
+        # Chicken
         'kfc', 'chick-fil-a', 'chick fil a', 'popeyes', 'raising canes',
-        "cane's", 'wingstop', 'buffalo wild wings', "zaxby's",
-        'chipotle', 'qdoba', "moe's", 'taco bell', 'del taco',
+        "cane's", 'wingstop', 'buffalo wild wings', "zaxby's", 'el pollo loco',
+        # Mexican
+        'chipotle', 'qdoba', "moe's", 'taco bell', 'del taco', 'taco bueno',
+        'baja fresh', 'green burrito', 'chronic tacos',
+        # Sandwiches / subs
         'subway', "jimmy john's", "jersey mike's", 'firehouse subs',
-        'potbelly', "jason's deli",
+        'potbelly', "jason's deli", 'togos',
+        # Pizza
         'pizza hut', "domino's", "papa john's", 'little caesars', 'sbarro',
+        "round table pizza", 'blaze pizza', 'mod pizza',
+        # Asian
         'panda express', 'pei wei',
+        'sushi', 'hissho', 'hissho sushi', 'ramen', 'hibachi', 'teriyaki',
+        'benihana', 'nobu', 'kura', 'sakura', 'kome', 'waba grill',
+        'yoshinoya', 'l&l hawaiian', 'flame broiler',
+        # Coffee / bakery
         'starbucks', 'dunkin', 'dunkin donuts', 'tim hortons',
-        'dutch bros', 'caribou coffee', "peet's coffee", 'panera bread', 'panera',
-        'einstein bagels', "bruegger's",
+        'dutch bros', 'caribou coffee', "peet's coffee", "peets coffee",
+        'panera bread', 'panera', 'einstein bagels', "bruegger's",
+        'coffee bean', 'urth caffe', 'alfred coffee', 'blue bottle',
+        'philz coffee', 'groundwork coffee', 'verve coffee',
+        # Casual dining
         'olive garden', "applebee's", "chili's", 'outback steakhouse',
         'longhorn steakhouse', 'red lobster', 'red robin',
         'cheesecake factory', 'ihop', "denny's", 'cracker barrel',
-        'waffle house', 'first watch', 'corner bakery',
-        'doordash', 'grubhub', 'uber eats', 'ubereats', 'seamless', 'postmates',
+        'waffle house', 'first watch', 'corner bakery', 'bj\'s restaurant',
+        # Delivery platforms
+        'doordash', 'grubhub', 'uber eats', 'ubereats', 'seamless',
+        'postmates', 'instacart', 'caviar',
+        # Generic restaurant descriptors (used in brand-map fulltext scan)
         'restaurant', 'ristorante', 'brasserie', 'bistro', 'tavern',
         'cafe', 'diner', 'eatery', 'kitchen', 'grill', 'steakhouse',
-        # Sushi / Japanese
-        'hissho', 'hissho sushi', 'sushi', 'ramen', 'hibachi', 'teriyaki',
-        'benihana', 'nobu', 'kura', 'sakura',
-        # Other common chains not listed above
-        'courtesy bistro', 'courtesy',
+        'chophouse', 'trattoria', 'cantina', 'taqueria', 'pizzeria',
+        'smokehouse', 'brew pub', 'gastropub', 'oyster bar',
+        # Common LA / airport spots
+        'courtesy bistro', 'courtesy', 'urth', 'sugarfish', 'jon & vinny',
+        'bottega louie', 'perino\'s', 'ink.sack', 'lax connector',
     ],
     'office': [
         'staples', 'office depot', 'officemax', 'office max',
@@ -892,6 +1115,7 @@ _BRAND_MAP = {
         'microsoft', 'adobe', 'google workspace', 'dropbox', 'zoom',
         'slack', 'notion', 'atlassian', 'github', 'aws ', 'amazon web',
         'apple store', 'dell', 'hp inc', 'lenovo',
+        'staples print', 'office print', 'kinko',
     ],
 }
 
@@ -915,15 +1139,35 @@ def _find_category(text):
             # positives (e.g. "accor" matching "according to card issuer")
             if len(brand) >= 6 and brand in tl:
                 return category
-    # Generic keyword fallback
+    # Generic keyword fallback (words that appear in the receipt body)
     generic = {
-        'travel':  ['flight', 'airline', 'airport', 'boarding', 'mileage', 'toll'],
-        'hotel':   ['hotel', 'inn', 'motel', 'resort', 'lodging', 'check-in'],
-        'meal':    ['restaurant', 'cafe', 'coffee', 'food', 'lunch', 'dinner'],
-        'office':  ['office', 'printing', 'shipping', 'postage', 'subscription'],
+        'travel':  [
+            'flight', 'airline', 'airport', 'boarding pass', 'boarding',
+            'departure', 'arrival', 'itinerary', 'gate ', 'terminal ',
+            'parking', 'valet', 'shuttle', 'rideshare', 'ride share',
+            'mileage', 'toll', 'fuel', 'gasoline', 'refuel',
+            'car rental', 'vehicle rental', 'rental car',
+        ],
+        'hotel':   [
+            'hotel', 'inn', 'motel', 'resort', 'lodging', 'check-in',
+            'check in', 'check out', 'checkout', 'room charge', 'room rate',
+            'nightly rate', 'room night', 'accommodation', 'folio',
+            'guest room', 'suite ', 'concierge',
+        ],
+        'meal':    [
+            'restaurant', 'cafe', 'coffee', 'food', 'lunch', 'dinner',
+            'breakfast', 'brunch', 'beverage', 'cocktail', 'appetizer',
+            'entree', 'dessert', 'takeout', 'take out', 'delivery',
+            'dine in', 'dine-in', 'to go', 'carry out',
+        ],
+        'office':  [
+            'office', 'printing', 'shipping', 'postage', 'subscription',
+            'software', 'license', 'storage', 'cloud', 'domain',
+            'supplies', 'stationery', 'toner', 'cartridge',
+        ],
     }
     for cat, words in generic.items():
-        if any(w in tl for w in words):
+        if any(re.search(r'\b' + re.escape(w.rstrip()) + r'\b', tl) for w in words):
             return cat
     return 'other'
 
@@ -1128,6 +1372,210 @@ def delete_expense(expense_id):
     conn.close()
     git_sync(f"Deleted expense: {expense_id}")
     return jsonify({'deleted': expense_id})
+
+
+@app.route('/api/expenses/export')
+def export_expenses_csv():
+    client_id = request.args.get('client_id')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    conn = get_conn()
+    cur = conn.cursor()
+    q = '''SELECT e.id, e.expense_date, e.vendor, e.amount, e.category,
+                  c.name as client_name, e.project, e.description,
+                  e.reimbursable, e.source
+           FROM expenses e
+           LEFT JOIN clients c ON e.client_id = c.id
+           WHERE 1=1'''
+    params = []
+    if client_id:
+        q += ' AND e.client_id = ?'
+        params.append(int(client_id))
+    if start_date:
+        q += ' AND e.expense_date >= ?'
+        params.append(start_date)
+    if end_date:
+        q += ' AND e.expense_date <= ?'
+        params.append(end_date)
+    q += ' ORDER BY e.expense_date, e.id'
+    cur.execute(q, params)
+    rows = cur.fetchall()
+    conn.close()
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['id', 'date', 'vendor', 'amount', 'category',
+                     'client', 'project', 'description', 'reimbursable', 'source'])
+    for r in rows:
+        writer.writerow([r['id'], r['expense_date'], r['vendor'], r['amount'],
+                         r['category'], r['client_name'] or '', r['project'] or '',
+                         r['description'] or '', 'yes' if r['reimbursable'] else 'no',
+                         r['source'] or ''])
+    output.seek(0)
+    return send_file(io.BytesIO(output.getvalue().encode('utf-8')),
+                     mimetype='text/csv', as_attachment=True,
+                     download_name='expenses.csv')
+
+
+@app.route('/api/expenses/report')
+def generate_expense_report():
+    client_id = request.args.get('client_id')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+
+    conn = get_conn()
+    cur = conn.cursor()
+
+    client = None
+    if client_id:
+        cur.execute('SELECT * FROM clients WHERE id = ?', (int(client_id),))
+        client = cur.fetchone()
+
+    q = '''SELECT e.*, c.name as client_name
+           FROM expenses e
+           LEFT JOIN clients c ON e.client_id = c.id
+           WHERE 1=1'''
+    params = []
+    if client_id:
+        q += ' AND e.client_id = ?'
+        params.append(int(client_id))
+    if start_date:
+        q += ' AND e.expense_date >= ?'
+        params.append(start_date)
+    if end_date:
+        q += ' AND e.expense_date <= ?'
+        params.append(end_date)
+    q += ' ORDER BY e.expense_date, e.id'
+    cur.execute(q, params)
+    expenses = cur.fetchall()
+    conn.close()
+
+    if not expenses:
+        return jsonify({'error': 'No expenses found for the selected filters'}), 404
+
+    total = round(sum(e['amount'] for e in expenses), 2)
+    report_date = datetime.now().date()
+
+    if start_date and end_date:
+        date_label = f"{start_date} to {end_date}"
+    elif start_date:
+        date_label = f"From {start_date}"
+    elif end_date:
+        date_label = f"Through {end_date}"
+    else:
+        dates = [e['expense_date'] for e in expenses]
+        date_label = f"{min(dates)} to {max(dates)}"
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=letter,
+                            rightMargin=72, leftMargin=72,
+                            topMargin=72, bottomMargin=18)
+    styles = getSampleStyleSheet()
+    styles.add(ParagraphStyle(name='ERRightAlign', alignment=TA_RIGHT))
+    styles.add(ParagraphStyle(name='ERLeftAlign', alignment=TA_LEFT))
+    story = []
+
+    # Header: business left, client right (if client selected)
+    right_top = f"Prepared For: {client['name']}" if client else ''
+    right_addr = (client['address'] or '') if client else ''
+    right_contact = (f"{client['email'] or ''} | {client['phone'] or ''}".strip(' | ')) if client else ''
+    hdata = [
+        [Paragraph(config.MY_NAME, styles['ERLeftAlign']),
+         Paragraph(right_top, styles['ERRightAlign'])],
+    ]
+    if config.BUSINESS_NAME:
+        hdata.append([Paragraph(config.BUSINESS_NAME, styles['ERLeftAlign']), ''])
+    hdata.append([Paragraph(config.MY_ADDRESS, styles['ERLeftAlign']),
+                  Paragraph(right_addr, styles['ERRightAlign'])])
+    hdata.append([Paragraph(f"{config.MY_PHONE} | {config.MY_EMAIL}", styles['ERLeftAlign']),
+                  Paragraph(right_contact, styles['ERRightAlign'])])
+    htable = Table(hdata, colWidths=[300, 200])
+    htable.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('LEFTPADDING', (0, 0), (-1, -1), 0),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 0),
+    ]))
+    story.append(htable)
+    story.append(Spacer(1, 12))
+    story.append(HLine(500))
+    story.append(Spacer(1, 12))
+
+    story.append(Paragraph("Expense Report", styles['Title']))
+    story.append(Spacer(1, 12))
+
+    ddata = [['Report Date:', str(report_date), 'Period:', date_label]]
+    dtable = Table(ddata, colWidths=[100, 100, 60, 240])
+    dtable.setStyle(TableStyle([
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+    ]))
+    story.append(dtable)
+    story.append(Spacer(1, 12))
+    story.append(HLine(500))
+    story.append(Spacer(1, 12))
+
+    # Expense table — include Client column only when not filtered by client
+    show_client = not client_id
+    if show_client:
+        headers = ['Date', 'Vendor', 'Category', 'Client', 'Project', 'Description', 'Amount']
+        col_widths = [55, 100, 60, 75, 60, 100, 50]
+    else:
+        headers = ['Date', 'Vendor', 'Category', 'Project', 'Description', 'Amount']
+        col_widths = [60, 130, 70, 80, 110, 50]
+
+    edata = [headers]
+    for e in expenses:
+        row = [e['expense_date'], e['vendor'], (e['category'] or '').capitalize()]
+        if show_client:
+            row.append(e['client_name'] or '')
+        row += [e['project'] or '', e['description'] or '', f"${e['amount']:.2f}"]
+        edata.append(row)
+
+    total_label_offset = -2 if show_client else -2
+    blank_cols = len(headers) - 2
+    edata.append([''] * blank_cols + ['Total:', f"${total:.2f}"])
+
+    etable = Table(edata, colWidths=col_widths)
+    etable.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
+        ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+        ('ALIGN', (-1, 0), (-1, -1), 'RIGHT'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+    ]))
+    story.append(etable)
+    story.append(Spacer(1, 12))
+
+    # Category summary (only useful when more than one category)
+    by_cat = defaultdict(float)
+    for e in expenses:
+        by_cat[(e['category'] or 'other').capitalize()] += e['amount']
+
+    if len(by_cat) > 1:
+        story.append(Paragraph("Summary by Category", styles['Heading3']))
+        story.append(Spacer(1, 6))
+        cdata = [['Category', 'Total']]
+        for cat, amt in sorted(by_cat.items()):
+            cdata.append([cat, f"${amt:.2f}"])
+        cdata.append(['Grand Total', f"${total:.2f}"])
+        ctable = Table(cdata, colWidths=[200, 100])
+        ctable.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
+            ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black),
+        ]))
+        story.append(ctable)
+
+    doc.build(story)
+    buf.seek(0)
+    client_slug = f"_{client['name'].replace(' ', '_')}" if client else ''
+    filename = f"expense_report{client_slug}_{report_date}.pdf"
+    return send_file(buf, mimetype='application/pdf', as_attachment=True, download_name=filename)
 
 
 @app.route('/api/expenses/parse-receipt', methods=['POST'])

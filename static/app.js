@@ -232,6 +232,52 @@ document.getElementById('invCancelBtn').addEventListener('click', () => {
   document.getElementById('invoiceModal').style.display = 'none';
 });
 
+// ── Expense Report modal ───────────────────────────────────────────────────────
+
+document.getElementById('expReportBtn').addEventListener('click', () => {
+  const sel = document.getElementById('erClientSelect');
+  sel.innerHTML = '<option value="">All Clients</option>';
+  clients.forEach(c => {
+    const opt = document.createElement('option');
+    opt.value = c.id;
+    opt.textContent = c.name;
+    sel.appendChild(opt);
+  });
+  document.getElementById('erStartDate').value = '';
+  document.getElementById('erEndDate').value = '';
+  document.getElementById('expReportModal').style.display = 'flex';
+});
+
+document.getElementById('erPdfBtn').addEventListener('click', () => {
+  const params = new URLSearchParams();
+  const clientId = document.getElementById('erClientSelect').value;
+  const start = document.getElementById('erStartDate').value;
+  const end = document.getElementById('erEndDate').value;
+  if (clientId) params.set('client_id', clientId);
+  if (start) params.set('start_date', start);
+  if (end) params.set('end_date', end);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  window.open(`/api/expenses/report${qs}`, '_blank');
+  document.getElementById('expReportModal').style.display = 'none';
+});
+
+document.getElementById('erCsvBtn').addEventListener('click', () => {
+  const params = new URLSearchParams();
+  const clientId = document.getElementById('erClientSelect').value;
+  const start = document.getElementById('erStartDate').value;
+  const end = document.getElementById('erEndDate').value;
+  if (clientId) params.set('client_id', clientId);
+  if (start) params.set('start_date', start);
+  if (end) params.set('end_date', end);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  window.location = `/api/expenses/export${qs}`;
+  document.getElementById('expReportModal').style.display = 'none';
+});
+
+document.getElementById('erCancelBtn').addEventListener('click', () => {
+  document.getElementById('expReportModal').style.display = 'none';
+});
+
 // ── Project Summary ───────────────────────────────────────────────────────────
 
 async function loadProjectsSummary() {

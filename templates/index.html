@@ -57,7 +57,13 @@
 
       <!-- ── Expenses ───────────────────────────────────────────── -->
       <div id="section-expenses" class="section" style="display:none">
-        <h2>Expenses</h2>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h2 style="margin:0">Expenses</h2>
+          <div style="display:flex;gap:8px;align-items:center">
+            <a href="/api/expenses/export" download="expenses.csv" class="btn-export">Export CSV</a>
+            <button id="expReportBtn" style="padding:6px 14px;font-size:0.85rem">Expense Report</button>
+          </div>
+        </div>
 
         <div class="expense-tabs">
           <button class="tab-btn active" data-tab="manual">Manual Entry</button>
@@ -192,6 +198,26 @@
         <div class="modal-actions">
           <button id="invGenerateBtn">Generate PDF</button>
           <button class="btn-secondary" id="invCancelBtn">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expense report modal -->
+    <div class="modal-overlay" id="expReportModal" style="display:none">
+      <div class="modal-box" style="max-width:420px">
+        <h3>Expense Report</h3>
+        <div class="modal-fields">
+          <label>Client
+            <select id="erClientSelect"><option value="">All Clients</option></select>
+          </label>
+          <label>&nbsp;</label>
+          <label>Start Date<input type="date" id="erStartDate" /></label>
+          <label>End Date<input type="date" id="erEndDate" /></label>
+        </div>
+        <div class="modal-actions">
+          <button id="erPdfBtn">Generate PDF</button>
+          <button id="erCsvBtn" class="btn-secondary">Export CSV</button>
+          <button id="erCancelBtn" class="btn-secondary">Cancel</button>
         </div>
       </div>
     </div>
