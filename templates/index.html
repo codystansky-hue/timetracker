@@ -143,9 +143,22 @@
           </div>
         </div>
 
+        <!-- Bulk action bar (shown when rows are checked) -->
+        <div id="expBulkBar" style="display:none">
+          <span id="expBulkCount"></span>
+          <label>Date <input type="date" id="expBulkDate" /></label>
+          <button id="expBulkApplyDate">Apply Date</button>
+          <label>Client
+            <select id="expBulkClient"><option value="">No Client</option></select>
+          </label>
+          <button id="expBulkApplyClient">Apply Client</button>
+          <button id="expBulkClear" class="btn-secondary">Clear</button>
+        </div>
+
         <table id="expensesTable">
           <thead>
             <tr>
+              <th><input type="checkbox" id="expCheckAll" title="Select all" /></th>
               <th>ID</th><th>Date</th><th>Vendor</th><th>Amount</th>
               <th>Category</th><th>Client</th><th>Project</th>
               <th>Reimb?</th><th>Source</th><th>Action</th>

@@ -406,6 +406,19 @@ td {
     color: var(--fg);
 }
 
+.btn-export {
+    display: inline-block;
+    padding: 6px 14px;
+    background: var(--border);
+    color: var(--fg);
+    border-radius: 6px;
+    font-size: 0.85rem;
+    text-decoration: none;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+.btn-export:hover { background: var(--text-muted); }
+
 .btn-secondary:hover {
     background: var(--text-muted);
     opacity: 1;
@@ -421,6 +434,66 @@ td {
     padding: 16px 20px;
     margin-bottom: 24px;
     gap: 16px;
+}
+
+/* ── Expense bulk action bar ─────────────────────────────────────────────── */
+
+#expBulkBar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 10px 16px;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 8px;
+    margin-bottom: 8px;
+    font-size: 0.88rem;
+}
+
+#expBulkBar label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-muted);
+}
+
+#expBulkBar input[type="date"],
+#expBulkBar select {
+    padding: 5px 10px;
+    font-size: 0.85rem;
+}
+
+#expBulkBar button {
+    padding: 5px 12px;
+    font-size: 0.85rem;
+}
+
+#expBulkCount {
+    color: var(--accent);
+    font-weight: 600;
+    min-width: 70px;
+    white-space: nowrap;
+}
+
+/* Inline-editable cells: subtle hover cue */
+td.exp-cell:hover {
+    background: var(--bg);
+    color: var(--accent);
+    cursor: pointer;
+}
+
+td.exp-cell input,
+td.exp-cell select {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 4px 6px;
+    font-size: 0.88rem;
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    color: var(--fg);
+    outline: none;
 }
 
 .raw-text-box {

@@ -308,35 +308,176 @@ async function loadProjectsSummary() {
 
 // ── Expenses ──────────────────────────────────────────────────────────────────
 
+const EXPENSE_CATS = ['other', 'travel', 'hotel', 'meal', 'office'];
+
+function escHtml(s) {
+  return String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
 async function loadExpenses() {
   const data = await api('/api/expenses');
+
+  // Refresh bulk-bar client dropdown
+  const bulkClientSel = document.getElementById('expBulkClient');
+  bulkClientSel.innerHTML = '<option value="">No Client</option>';
+  clients.forEach(c => {
+    const o = document.createElement('option');
+    o.value = c.id; o.textContent = c.name;
+    bulkClientSel.appendChild(o);
+  });
+
   const tbody = document.querySelector('#expensesTable tbody');
   tbody.innerHTML = '';
+
   data.forEach(exp => {
     const tr = document.createElement('tr');
     tr.dataset.id = exp.id;
     tr.innerHTML = `
+      <td><input type="checkbox" class="exp-check" data-id="${exp.id}" /></td>
       <td>${exp.id}</td>
-      <td>${exp.expense_date}</td>
-      <td>${exp.vendor}</td>
-      <td>$${parseFloat(exp.amount).toFixed(2)}</td>
-      <td>${exp.category || ''}</td>
-      <td>${exp.client_name || ''}</td>
-      <td>${exp.project || ''}</td>
-      <td>${exp.reimbursable ? 'Yes' : 'No'}</td>
+      <td class="exp-cell" data-field="expense_date" data-id="${exp.id}" data-raw="${exp.expense_date || ''}">${exp.expense_date || ''}</td>
+      <td class="exp-cell" data-field="vendor"       data-id="${exp.id}" data-raw="${escHtml(exp.vendor || '')}">${escHtml(exp.vendor || '')}</td>
+      <td class="exp-cell" data-field="amount"       data-id="${exp.id}" data-raw="${exp.amount}">$${parseFloat(exp.amount).toFixed(2)}</td>
+      <td class="exp-cell" data-field="category"     data-id="${exp.id}" data-raw="${exp.category || 'other'}">${exp.category || ''}</td>
+      <td class="exp-cell" data-field="client_id"    data-id="${exp.id}" data-raw="${exp.client_id || ''}">${exp.client_name || '—'}</td>
+      <td class="exp-cell" data-field="project"      data-id="${exp.id}" data-raw="${escHtml(exp.project || '')}">${escHtml(exp.project || '')}</td>
+      <td class="exp-cell" data-field="reimbursable" data-id="${exp.id}" data-raw="${exp.reimbursable ? 1 : 0}">${exp.reimbursable ? 'Yes' : 'No'}</td>
       <td>${exp.source || ''}</td>
-      <td><button class="delExp" data-id="${exp.id}">Delete</button></td>
+      <td><button class="delExp btn-secondary" data-id="${exp.id}">Delete</button></td>
     `;
     tbody.appendChild(tr);
   });
-  document.querySelectorAll('.delExp').forEach(b => b.addEventListener('click', async ev => {
+
+  tbody.querySelectorAll('.exp-cell').forEach(cell => cell.addEventListener('click', expCellClick));
+  tbody.querySelectorAll('.exp-check').forEach(cb => cb.addEventListener('change', updateExpBulkBar));
+  tbody.querySelectorAll('.delExp').forEach(b => b.addEventListener('click', async ev => {
     const id = ev.target.dataset.id;
     if (confirm(`Delete expense ${id}?`)) {
       await api(`/api/expenses/${id}`, 'DELETE');
       loadExpenses();
     }
   }));
+
+  updateExpBulkBar();
 }
+
+// Inline cell editor
+function expCellClick(ev) {
+  const cell = ev.currentTarget;
+  if (cell.querySelector('input, select')) return; // already open
+
+  const { field, id, raw } = cell.dataset;
+  const originalText = cell.textContent.trim();
+
+  // Reimbursable: just toggle, no input needed
+  if (field === 'reimbursable') {
+    const newVal = raw === '1' ? 0 : 1;
+    api(`/api/expenses/${id}`, 'PUT', { reimbursable: newVal }).then(() => loadExpenses());
+    return;
+  }
+
+  let el;
+  if (field === 'expense_date') {
+    el = Object.assign(document.createElement('input'), { type: 'date', value: raw });
+  } else if (field === 'amount') {
+    el = Object.assign(document.createElement('input'), { type: 'number', step: '0.01', value: raw });
+  } else if (field === 'category') {
+    el = document.createElement('select');
+    EXPENSE_CATS.forEach(cat => {
+      const o = Object.assign(document.createElement('option'), { value: cat, textContent: cat });
+      if (cat === raw) o.selected = true;
+      el.appendChild(o);
+    });
+  } else if (field === 'client_id') {
+    el = document.createElement('select');
+    el.innerHTML = '<option value="">No Client</option>';
+    clients.forEach(c => {
+      const o = Object.assign(document.createElement('option'), { value: c.id, textContent: c.name });
+      if (String(c.id) === String(raw)) o.selected = true;
+      el.appendChild(o);
+    });
+  } else {
+    el = Object.assign(document.createElement('input'), { type: 'text', value: raw });
+  }
+
+  const done = { v: false };
+
+  async function save() {
+    if (done.v) return; done.v = true;
+    let val = el.value;
+    if (field === 'client_id') val = val || null;
+    if (field === 'amount') val = parseFloat(val);
+    await api(`/api/expenses/${id}`, 'PUT', { [field]: val });
+    loadExpenses();
+  }
+
+  function cancel() {
+    if (done.v) return; done.v = true;
+    cell.textContent = originalText;
+    cell.addEventListener('click', expCellClick);
+  }
+
+  cell.textContent = '';
+  cell.appendChild(el);
+  el.focus();
+  if (el.type !== 'select-one' && el.type !== 'number' && el.select) el.select();
+
+  el.addEventListener('blur', save);
+  el.addEventListener('keydown', e => {
+    if (e.key === 'Enter')  { e.preventDefault(); el.blur(); }
+    if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+  });
+  el.addEventListener('click', e => e.stopPropagation());
+}
+
+// Bulk helpers
+function getCheckedExpenseIds() {
+  return [...document.querySelectorAll('.exp-check:checked')].map(cb => cb.dataset.id);
+}
+
+function updateExpBulkBar() {
+  const ids = getCheckedExpenseIds();
+  const allCbs = document.querySelectorAll('.exp-check');
+  const allCb  = document.getElementById('expCheckAll');
+  document.getElementById('expBulkBar').style.display = ids.length ? 'flex' : 'none';
+  document.getElementById('expBulkCount').textContent  = `${ids.length} selected`;
+  if (allCb) {
+    allCb.checked       = ids.length > 0 && ids.length === allCbs.length;
+    allCb.indeterminate = ids.length > 0 && ids.length < allCbs.length;
+  }
+}
+
+// Select-all checkbox
+document.getElementById('expCheckAll').addEventListener('change', ev => {
+  document.querySelectorAll('.exp-check').forEach(cb => cb.checked = ev.target.checked);
+  updateExpBulkBar();
+});
+
+// Bulk apply date
+document.getElementById('expBulkApplyDate').addEventListener('click', async () => {
+  const date = document.getElementById('expBulkDate').value;
+  if (!date) return alert('Enter a date to apply');
+  const ids = getCheckedExpenseIds();
+  await Promise.all(ids.map(id => api(`/api/expenses/${id}`, 'PUT', { expense_date: date })));
+  loadExpenses();
+});
+
+// Bulk apply client
+document.getElementById('expBulkApplyClient').addEventListener('click', async () => {
+  const clientId = document.getElementById('expBulkClient').value || null;
+  const ids = getCheckedExpenseIds();
+  await Promise.all(ids.map(id => api(`/api/expenses/${id}`, 'PUT', { client_id: clientId })));
+  loadExpenses();
+});
+
+// Clear selection
+document.getElementById('expBulkClear').addEventListener('click', () => {
+  document.querySelectorAll('.exp-check').forEach(cb => cb.checked = false);
+  const allCb = document.getElementById('expCheckAll');
+  if (allCb) { allCb.checked = false; allCb.indeterminate = false; }
+  updateExpBulkBar();
+});
 
 // Expense tab switching
 document.querySelectorAll('.tab-btn').forEach(btn => {
