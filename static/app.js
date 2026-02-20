@@ -10,8 +10,9 @@ let receiptQueue = [];      // pending crops waiting for review
 
 function formatDate(isoStr) {
   if (!isoStr) return '';
-  const date = new Date(isoStr.endsWith('Z') ? isoStr : isoStr + 'Z');
-  return date.toLocaleString();
+  const hastz = isoStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(isoStr);
+  const d = new Date(hastz ? isoStr : isoStr + 'Z');
+  return isNaN(d) ? isoStr : d.toLocaleString();
 }
 
 async function api(path, method = 'GET', body) {
@@ -63,8 +64,8 @@ function renderEntriesPage() {
       <td class="editable" data-field="client_id">${clientName}</td>
       <td class="editable" data-field="project">${e.project}</td>
       <td class="editable" data-field="description">${e.description || ''}</td>
-      <td class="editable" data-field="start_ts">${formatDate(e.start_ts)}</td>
-      <td class="editable" data-field="end_ts">${formatDate(e.end_ts)}</td>
+      <td class="editable" data-field="start_ts" data-raw="${e.start_ts || ''}">${formatDate(e.start_ts)}</td>
+      <td class="editable" data-field="end_ts" data-raw="${e.end_ts || ''}">${formatDate(e.end_ts)}</td>
       <td class="duration-cell" data-start="${e.start_ts}">${e.duration_min || '0'}</td>
       <td>${isActive ? '<span class="status-badge active">● Active</span>' : '<span class="status-badge">Done</span>'}</td>
       <td><button data-id="${e.id}" class="del">Delete</button></td>
@@ -84,8 +85,9 @@ function renderEntriesPage() {
     cell.addEventListener('dblclick', ev => {
       const field = ev.target.dataset.field;
       const id = ev.target.parentNode.dataset.id;
-      const originalValue = ev.target.textContent;
+
       if (field === 'client_id') {
+        const originalValue = ev.target.textContent;
         const sel = document.createElement('select');
         sel.innerHTML = '<option value="">Select Client</option>';
         clients.forEach(c => {
@@ -102,7 +104,34 @@ function renderEntriesPage() {
         ev.target.innerHTML = '';
         ev.target.appendChild(sel);
         sel.focus();
+      } else if (field === 'start_ts' || field === 'end_ts') {
+        // Use raw ISO string → convert to datetime-local value (local time, no tz suffix)
+        const rawIso = ev.target.dataset.raw;
+        const hastz = rawIso.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(rawIso);
+        const d = rawIso ? new Date(hastz ? rawIso : rawIso + 'Z') : new Date();
+        const localIso = new Date(d.getTime() - d.getTimezoneOffset() * 60000)
+          .toISOString().slice(0, 16);
+        const inp = document.createElement('input');
+        inp.type = 'datetime-local';
+        inp.value = localIso;
+        inp.style.width = '180px';
+        const save = async () => {
+          const chosen = inp.value;
+          if (!chosen) { loadAll(); return; }
+          // Store as UTC ISO string
+          const utc = new Date(chosen).toISOString();
+          const body = { id };
+          body[field] = utc;
+          await api('/api/edit', 'POST', body);
+          loadAll();
+        };
+        inp.addEventListener('blur', save);
+        inp.addEventListener('keydown', e => { if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') loadAll(); });
+        ev.target.textContent = '';
+        ev.target.appendChild(inp);
+        inp.focus();
       } else {
+        const originalValue = ev.target.textContent;
         const newValue = prompt(`Edit ${field}`, originalValue);
         if (newValue !== null && newValue !== originalValue) {
           const body = { id };
@@ -686,7 +715,8 @@ if ('serviceWorker' in navigator) {
 setInterval(() => {
   document.querySelectorAll('.active-row .duration-cell').forEach(cell => {
     const startStr = cell.dataset.start;
-    const start = new Date(startStr.endsWith('Z') ? startStr : startStr + 'Z');
+    const hastz = startStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(startStr);
+    const start = new Date(hastz ? startStr : startStr + 'Z');
     const now = new Date();
     cell.textContent = Math.floor((now - start) / 60000);
   });
