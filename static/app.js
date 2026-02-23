@@ -251,6 +251,7 @@ document.getElementById('invGenerateBtn').addEventListener('click', () => {
   const end = document.getElementById('invEndDate').value;
   if (start) params.set('start_date', start);
   if (end) params.set('end_date', end);
+  if (!document.getElementById('invIncludeExpenses').checked) params.set('include_expenses', '0');
   if (document.getElementById('invDraft').checked) params.set('draft', '1');
   const qs = params.toString() ? `?${params.toString()}` : '';
   window.open(`/generate_invoice/${invoiceClientId}${qs}`, '_blank');

@@ -1,7 +1,7 @@
 # Configuration file for invoice generation
 # Personal/Business Details
 MY_NAME = "Cody Stansky"
-BUSINESS_NAME = "CS Tech"
+BUSINESS_NAME = ""
 MY_PHONE = "+1 561 339 9812"
 MY_EMAIL = "Codystansky@gmail.com"
 MY_ADDRESS = "37 Glory Lane, White Salmon WA, 98672"

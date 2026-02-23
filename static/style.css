@@ -221,6 +221,7 @@ td {
     font-size: 0.75rem;
     background: var(--border);
     color: var(--text-muted);
+    white-space: nowrap;
 }
 
 .status-badge.active {

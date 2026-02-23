@@ -194,11 +194,18 @@ def edit():
         conn.close()
         return jsonify({'error': 'Entry not found'}), 404
 
+    def _normalize_ts(ts):
+        """Strip timezone info so all timestamps are stored as naive UTC strings."""
+        if not ts:
+            return ts
+        d = datetime.fromisoformat(ts)
+        return d.replace(tzinfo=None).isoformat()
+
     client_id = data.get('client_id', existing_entry['client_id'])
     project = data.get('project', existing_entry['project'])
     description = data.get('description', existing_entry['description'])
-    start_ts_str = data.get('start_ts', existing_entry['start_ts'])
-    end_ts_str = data.get('end_ts', existing_entry['end_ts'])
+    start_ts_str = _normalize_ts(data.get('start_ts', existing_entry['start_ts']))
+    end_ts_str = _normalize_ts(data.get('end_ts', existing_entry['end_ts']))
 
     duration_min = existing_entry['duration_min']
 
@@ -1514,20 +1521,25 @@ def generate_expense_report():
     story.append(Spacer(1, 12))
 
     # Expense table — include Client column only when not filtered by client
+    # Usable page width = 612 - 72*2 = 468pt
     show_client = not client_id
     if show_client:
         headers = ['Date', 'Vendor', 'Category', 'Client', 'Project', 'Description', 'Amount']
-        col_widths = [55, 100, 60, 75, 60, 100, 50]
+        col_widths = [55, 88, 58, 65, 52, 100, 50]  # total = 468
     else:
         headers = ['Date', 'Vendor', 'Category', 'Project', 'Description', 'Amount']
-        col_widths = [60, 130, 70, 80, 110, 50]
+        col_widths = [58, 100, 65, 68, 127, 50]  # total = 468
 
     edata = [headers]
     for e in expenses:
-        row = [e['expense_date'], e['vendor'], (e['category'] or '').capitalize()]
+        row = [
+            e['expense_date'],
+            Paragraph(e['vendor'] or '', styles['Normal']),
+            Paragraph((e['category'] or '').capitalize(), styles['Normal']),
+        ]
         if show_client:
-            row.append(e['client_name'] or '')
-        row += [e['project'] or '', e['description'] or '', f"${e['amount']:.2f}"]
+            row.append(Paragraph(e['client_name'] or '', styles['Normal']))
+        row += [e['project'] or '', Paragraph(e['description'] or '', styles['Normal']), f"${e['amount']:.2f}"]
         edata.append(row)
 
     total_label_offset = -2 if show_client else -2
@@ -1687,6 +1699,7 @@ def parse_email():
 @app.route('/generate_invoice/<int:client_id>')
 def generate_invoice(client_id):
     draft = request.args.get('draft', '0') == '1'
+    include_expenses = request.args.get('include_expenses', '1') == '1'
     start_date = request.args.get('start_date')  # YYYY-MM-DD, optional
     end_date = request.args.get('end_date')        # YYYY-MM-DD, optional
     conn = get_conn()
@@ -1712,17 +1725,19 @@ def generate_invoice(client_id):
     entries = cur.fetchall()
 
     # Get unbilled reimbursable expenses, optionally filtered by date range
-    exp_q = 'SELECT * FROM expenses WHERE client_id = ? AND reimbursable = 1 AND invoice_id IS NULL'
-    exp_p = [client_id]
-    if start_date:
-        exp_q += ' AND expense_date >= ?'
-        exp_p.append(start_date)
-    if end_date:
-        exp_q += ' AND expense_date <= ?'
-        exp_p.append(end_date)
-    exp_q += ' ORDER BY expense_date'
-    cur.execute(exp_q, exp_p)
-    reimbursable_expenses = cur.fetchall()
+    reimbursable_expenses = []
+    if include_expenses:
+        exp_q = 'SELECT * FROM expenses WHERE client_id = ? AND reimbursable = 1 AND invoice_id IS NULL'
+        exp_p = [client_id]
+        if start_date:
+            exp_q += ' AND expense_date >= ?'
+            exp_p.append(start_date)
+        if end_date:
+            exp_q += ' AND expense_date <= ?'
+            exp_p.append(end_date)
+        exp_q += ' ORDER BY expense_date'
+        cur.execute(exp_q, exp_p)
+        reimbursable_expenses = cur.fetchall()
 
     if not entries and not reimbursable_expenses:
         conn.close()
@@ -1851,10 +1866,10 @@ def generate_invoice(client_id):
         tdata = [['Date', 'Description', 'Hours', 'Subtotal']]
         for e in entries:
             d = datetime.fromisoformat(e['start_ts']).date()
-            desc = e['description'] or e['project']
+            desc = e['description'] or e['project'] or ''
             hrs = round(e['duration_min'] / 60, 2)
             subtotal = round(hrs * hourly_rate, 2)
-            tdata.append([str(d), desc, f"{hrs}", f"${subtotal:.2f}"])
+            tdata.append([str(d), Paragraph(desc, styles['Normal']), f"{hrs}", f"${subtotal:.2f}"])
         tdata.append(['', time_label, str(total_hours), f"${total_amount:.2f}"])
 
         time_table = Table(tdata, colWidths=[80, 250, 60, 80])
@@ -1882,7 +1897,7 @@ def generate_invoice(client_id):
                 exp['expense_date'],
                 exp['vendor'],
                 (exp['category'] or '').capitalize(),
-                exp['description'] or '',
+                Paragraph(exp['description'] or '', styles['Normal']),
                 f"${exp['amount']:.2f}",
             ])
         edata.append(['', '', '', 'Expense Total:', f"${expense_total:.2f}"])
@@ -1928,8 +1943,9 @@ def generate_invoice(client_id):
     story.append(Paragraph(config.LATE_FEE_POLICY, styles['Normal']))
     story.append(Spacer(1, 6))
     story.append(Paragraph("Payment Instructions:", styles['Heading3']))
-    story.append(Paragraph(f"Bank: {config.BANK_NAME} | Routing: {config.ROUTING_NUM} | Account: {config.ACCT_NUM}", styles['Normal']))
-    story.append(Paragraph(f"PayPal: {config.PAYPAL_EMAIL}", styles['Normal']))
+    story.append(Paragraph(f"Bank: {config.BANK_NAME}", styles['Normal']))
+    if config.PAYPAL_EMAIL:
+        story.append(Paragraph(f"PayPal: {config.PAYPAL_EMAIL}", styles['Normal']))
 
     doc.build(story)
 
