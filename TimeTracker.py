@@ -1,5 +1,6 @@
-from flask import Flask, jsonify, request, send_file, render_template
+from flask import Flask, jsonify, request, send_file, render_template, send_from_directory
 import sqlite3
+import socket
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -11,7 +12,7 @@ import re
 import uuid
 from collections import defaultdict
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image as RLImage, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.enums import TA_CENTER, TA_RIGHT, TA_LEFT
@@ -1271,6 +1272,90 @@ def _parse_hotel_email(text):
     return result
 
 
+def _parse_uber_email(text):
+    """Parse a Uber weekly/monthly trip statement into a list of expense dicts."""
+    lines = [l.strip() for l in text.split('\n')]
+
+    # Infer year from email, fall back to current year
+    year_m = re.search(r'\b(20\d{2})\b', text)
+    default_year = int(year_m.group(1)) if year_m else datetime.now().year
+
+    month_pat = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|'
+                 r'Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|'
+                 r'Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)')
+    dow_pat   = r'(?:(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun)(?:day)?,?\s+)?'
+
+    # Matches: "Sunday, February 9" / "Feb 9" / "Feb 9, 2026" / "February 9 2026"
+    date_re = re.compile(
+        dow_pat + r'(' + month_pat + r'\s+\d{1,2}(?:,?\s*\d{4})?)',
+        re.IGNORECASE,
+    )
+    # Matches a bare dollar amount on a line, or "Fare: $X" / "Total: $X"
+    amount_re = re.compile(
+        r'(?:^|(?:fare|total|charged?|amount)[:\s]+)\$?\s*(\d+\.\d{2})',
+        re.IGNORECASE,
+    )
+    # Same-line: "Feb 9   $11.93" or "Feb 9 · $11.93"
+    inline_re = re.compile(
+        dow_pat + r'(' + month_pat + r'\s+\d{1,2}(?:,?\s*\d{4})?)'
+        r'[\s·\-–—|]+\$?\s*(\d+\.\d{2})',
+        re.IGNORECASE,
+    )
+
+    trips = []
+    current_date = None
+
+    for line in lines:
+        # Try inline "date  $amount" first
+        m = inline_re.search(line)
+        if m:
+            date_str = m.group(1)
+            if not re.search(r'\d{4}', date_str):
+                date_str = f"{date_str} {default_year}"
+            parsed_date = _normalize_date(date_str)
+            try:
+                amount = float(m.group(2))
+                if parsed_date and amount > 0:
+                    trips.append({
+                        'vendor': 'Uber', 'amount': amount,
+                        'expense_date': parsed_date,
+                        'category': 'travel', 'description': '',
+                        'reimbursable': True,
+                    })
+                    current_date = parsed_date
+            except ValueError:
+                pass
+            continue
+
+        # Date-only header line
+        dm = date_re.fullmatch(line) or (date_re.search(line) if len(line) < 60 else None)
+        if dm:
+            date_str = dm.group(1)
+            if not re.search(r'\d{4}', date_str):
+                date_str = f"{date_str} {default_year}"
+            parsed = _normalize_date(date_str)
+            if parsed:
+                current_date = parsed
+            continue
+
+        # Amount-only line
+        am = amount_re.match(line)
+        if am and current_date:
+            try:
+                amount = float(am.group(1))
+                if amount > 0:
+                    trips.append({
+                        'vendor': 'Uber', 'amount': amount,
+                        'expense_date': current_date,
+                        'category': 'travel', 'description': '',
+                        'reimbursable': True,
+                    })
+            except ValueError:
+                pass
+
+    return trips
+
+
 def _parse_email_text(text):
     """Dispatch to flight/hotel parser or fall back to generic; adds confidence key."""
     text_lower = text.lower()
@@ -1353,7 +1438,7 @@ def update_expense(expense_id):
         conn.close()
         return jsonify({'error': 'Expense not found'}), 404
     allowed = ['client_id', 'project', 'vendor', 'amount', 'expense_date',
-               'category', 'description', 'reimbursable', 'source']
+               'category', 'description', 'reimbursable', 'source', 'receipt_path']
     updates, params = [], []
     for field in allowed:
         if field in data:
@@ -1677,8 +1762,16 @@ def lookup_vendor():
 
 @app.route('/qr.png')
 def qr_png():
-    """Generate a QR code using the URL the browser actually used to reach us."""
-    url = request.host_url.rstrip('/')
+    """Generate a QR code using the LAN IP so phone can always reach the server."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(('8.8.8.8', 80))
+        lan_ip = s.getsockname()[0]
+        s.close()
+    except Exception:
+        lan_ip = request.host.split(':')[0]
+    port = request.host.split(':')[1] if ':' in request.host else '80'
+    url = f'http://{lan_ip}:{port}'
     img = qrcode.make(url)
     buf = io.BytesIO()
     img.save(buf, format='PNG')
@@ -1692,6 +1785,20 @@ def parse_email():
     text = data.get('text', '')
     if not text.strip():
         return jsonify({'error': 'text required'}), 400
+
+    # Uber weekly/monthly statement → multiple trips
+    text_lower = text.lower()
+    is_uber = 'uber' in text_lower and not any(
+        w in text_lower for w in ['flight', 'airline', 'hotel', 'check-in', 'reservation']
+    )
+    if is_uber:
+        trips = _parse_uber_email(text)
+        if len(trips) > 1:
+            return jsonify({
+                'results': [{'parsed': t} for t in trips],
+                'count': len(trips),
+            })
+
     parsed = _parse_email_text(text)
     return jsonify({'parsed': parsed})
 
@@ -1947,9 +2054,76 @@ def generate_invoice(client_id):
     if config.PAYPAL_EMAIL:
         story.append(Paragraph(f"PayPal: {config.PAYPAL_EMAIL}", styles['Normal']))
 
+    # Receipt appendix — one page break, then receipts 2-up
+    receipts_to_append = [e for e in reimbursable_expenses if e.get('receipt_path')]
+    if receipts_to_append:
+        story.append(PageBreak())
+        story.append(Paragraph("Exhibit A – Receipt Documentation", styles['Heading2']))
+        story.append(Spacer(1, 12))
+
+        MAX_W, MAX_H = 234, 340  # pt — two columns with a small gutter
+
+        def _rl_img(receipt_path):
+            full = APP_ROOT / receipt_path
+            if not full.exists():
+                return None
+            try:
+                pil_img = Image.open(str(full))
+                iw, ih = pil_img.size
+                ratio = min(MAX_W / iw, MAX_H / ih)
+                return RLImage(str(full), width=iw * ratio, height=ih * ratio)
+            except Exception:
+                return None
+
+        # Group into pairs for 2-column layout
+        for i in range(0, len(receipts_to_append), 2):
+            pair = receipts_to_append[i:i + 2]
+            cells = []
+            for exp in pair:
+                img = _rl_img(exp['receipt_path'])
+                caption = Paragraph(
+                    f"<b>{exp['vendor']}</b>  {exp['expense_date']}  ${exp['amount']:.2f}",
+                    styles['Normal']
+                )
+                cells.append([img or Paragraph('[image missing]', styles['Normal']), caption])
+            if len(cells) == 1:
+                cells.append([''])  # pad to 2 columns
+            row_table = Table([cells], colWidths=[240, 240])
+            row_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+                ('ALIGN',  (0, 0), (-1, -1), 'CENTER'),
+                ('BOTTOMPADDING', (0, 0), (-1, -1), 16),
+            ]))
+            story.append(row_table)
+
     doc.build(story)
 
     return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{prefix}{invoice_number}.pdf')
+
+@app.route('/api/expenses/<int:expense_id>/receipt', methods=['POST'])
+def attach_receipt(expense_id):
+    """Upload an image/PDF and link it to an expense without running OCR."""
+    f = request.files.get('file')
+    if not f:
+        return jsonify({'error': 'no file'}), 400
+    ext = Path(secure_filename(f.filename)).suffix.lower()
+    if ext not in ALLOWED_RECEIPT_EXTENSIONS:
+        return jsonify({'error': f'unsupported file type {ext}'}), 400
+    filename = f"{uuid.uuid4().hex}_{secure_filename(f.filename)}"
+    dest = UPLOADS_DIR / filename
+    f.save(str(dest))
+    receipt_path = f'uploads/{filename}'
+    conn = get_conn()
+    conn.execute('UPDATE expenses SET receipt_path=? WHERE id=?', (receipt_path, expense_id))
+    conn.commit()
+    conn.close()
+    return jsonify({'receipt_path': receipt_path})
+
+
+@app.route('/uploads/<path:filename>')
+def serve_upload(filename):
+    return send_from_directory(str(UPLOADS_DIR), filename)
+
 
 @app.route('/sw.js')
 def service_worker():

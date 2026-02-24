@@ -5,3 +5,5 @@ Pillow>=10.0
 opencv-python>=4.8
 qrcode[pil]>=7.4
 pdf2image>=1.16
+pyOpenSSL>=25.0
+cryptography>=44.0

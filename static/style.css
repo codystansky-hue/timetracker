@@ -509,3 +509,40 @@ td.exp-cell select {
     color: var(--text-muted);
     margin-top: 8px;
 }
+.receipt-thumb {
+    width: 48px;
+    height: 48px;
+    object-fit: cover;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    display: block;
+    cursor: pointer;
+}
+
+.attach-btn {
+    cursor: pointer;
+    padding: 4px 8px;
+    font-size: 0.8rem;
+    border-radius: 4px;
+    display: inline-block;
+}
+
+.receipt-cell {
+    text-align: center;
+    width: 60px;
+}
+
+.receipt-wrap {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+}
+
+.receipt-wrap .removeReceipt {
+    padding: 2px 6px;
+    font-size: 0.75rem;
+    background: var(--error);
+    color: #1a1b26;
+    line-height: 1;
+}

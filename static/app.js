@@ -216,6 +216,7 @@ async function loadClients() {
     document.getElementById('invStartDate').value = '';
     document.getElementById('invEndDate').value = '';
     document.getElementById('invDraft').checked = false;
+    document.getElementById('invIncludeExpenses').checked = true;
     document.getElementById('invoiceModal').style.display = 'flex';
   }));
 
@@ -374,6 +375,18 @@ async function loadExpenses() {
       <td class="exp-cell" data-field="project"      data-id="${exp.id}" data-raw="${escHtml(exp.project || '')}">${escHtml(exp.project || '')}</td>
       <td class="exp-cell" data-field="reimbursable" data-id="${exp.id}" data-raw="${exp.reimbursable ? 1 : 0}">${exp.reimbursable ? 'Yes' : 'No'}</td>
       <td>${exp.source || ''}</td>
+      <td class="receipt-cell">
+        ${exp.receipt_path
+          ? `<div class="receipt-wrap">
+               <a href="/${exp.receipt_path}" target="_blank" title="View receipt">
+                 <img src="/${exp.receipt_path}" class="receipt-thumb" alt="receipt" />
+               </a>
+               <button class="removeReceipt btn-secondary" data-id="${exp.id}" title="Remove receipt">✕</button>
+             </div>`
+          : `<label class="attach-btn btn-secondary" title="Attach receipt">
+               + <input type="file" class="attachReceiptInput" data-id="${exp.id}" accept="image/*,.pdf" style="display:none" />
+             </label>`}
+      </td>
       <td><button class="delExp btn-secondary" data-id="${exp.id}">Delete</button></td>
     `;
     tbody.appendChild(tr);
@@ -381,6 +394,27 @@ async function loadExpenses() {
 
   tbody.querySelectorAll('.exp-cell').forEach(cell => cell.addEventListener('click', expCellClick));
   tbody.querySelectorAll('.exp-check').forEach(cb => cb.addEventListener('change', updateExpBulkBar));
+  tbody.querySelectorAll('.attachReceiptInput').forEach(input => {
+    input.addEventListener('change', async ev => {
+      const file = ev.target.files[0];
+      if (!file) return;
+      const id = ev.target.dataset.id;
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch(`/api/expenses/${id}/receipt`, { method: 'POST', body: formData });
+      const data = await res.json();
+      if (data.error) return alert(`Upload error: ${data.error}`);
+      loadExpenses();
+    });
+  });
+
+  tbody.querySelectorAll('.removeReceipt').forEach(b => b.addEventListener('click', async ev => {
+    const id = ev.target.dataset.id;
+    if (!confirm('Remove this receipt?')) return;
+    await api(`/api/expenses/${id}`, 'PUT', { receipt_path: '' });
+    loadExpenses();
+  }));
+
   tbody.querySelectorAll('.delExp').forEach(b => b.addEventListener('click', async ev => {
     const id = ev.target.dataset.id;
     if (confirm(`Delete expense ${id}?`)) {
@@ -575,7 +609,14 @@ document.getElementById('parseEmailBtn').addEventListener('click', async () => {
   if (!text) return alert('Please paste email confirmation text first');
   const data = await api('/api/expenses/parse-email', 'POST', { text });
   if (data.error) return alert(`Error: ${data.error}`);
-  openExpenseModal(data.parsed, 'email', null, null);
+  if (data.results && data.results.length > 0) {
+    const status = document.getElementById('receiptStatus');
+    status.textContent = `Found ${data.count} trips — reviewing one by one.`;
+    receiptQueue = [...data.results];
+    openNextFromQueue();
+  } else {
+    openExpenseModal(data.parsed, 'email', null, null);
+  }
 });
 
 // Auto-categorise when vendor name is entered in the modal
