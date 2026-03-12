@@ -53,17 +53,17 @@ def git_sync(message="Sync database"):
         # Check if we are in a git repo
         subprocess.run(['git', 'rev-parse', '--is-inside-work-tree'], check=True, capture_output=True, cwd=APP_ROOT)
         
-        # Pull latest changes first
-        subprocess.run(['git', 'pull', '--rebase'], check=True, cwd=APP_ROOT)
-        
-        # Add, commit and push
+        # Commit local changes first to avoid "cannot pull with unstaged changes"
         subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
-        # Check for changes to avoid empty commits
         status = subprocess.run(['git', 'status', '--porcelain', str(DB_PATH)], check=True, capture_output=True, text=True, cwd=APP_ROOT)
         if status.stdout.strip():
             subprocess.run(['git', 'commit', '-m', message], check=True, cwd=APP_ROOT)
-            # Push to origin
-            subprocess.run(['git', 'push'], check=True, cwd=APP_ROOT)
+
+        # Pull latest changes
+        subprocess.run(['git', 'pull', '--rebase'], check=True, cwd=APP_ROOT)
+
+        # Push to origin
+        subprocess.run(['git', 'push'], check=True, cwd=APP_ROOT)
     except Exception as e:
         app.logger.error(f"Git sync failed: {e}")
 
