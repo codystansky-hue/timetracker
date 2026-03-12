@@ -305,6 +305,19 @@ document.getElementById('erCsvBtn').addEventListener('click', () => {
   document.getElementById('expReportModal').style.display = 'none';
 });
 
+document.getElementById('erZipBtn').addEventListener('click', () => {
+  const params = new URLSearchParams();
+  const clientId = document.getElementById('erClientSelect').value;
+  const start = document.getElementById('erStartDate').value;
+  const end = document.getElementById('erEndDate').value;
+  if (clientId) params.set('client_id', clientId);
+  if (start) params.set('start_date', start);
+  if (end) params.set('end_date', end);
+  const qs = params.toString() ? `?${params.toString()}` : '';
+  window.location = `/api/expenses/receipts-zip${qs}`;
+  document.getElementById('expReportModal').style.display = 'none';
+});
+
 document.getElementById('erCancelBtn').addEventListener('click', () => {
   document.getElementById('expReportModal').style.display = 'none';
 });

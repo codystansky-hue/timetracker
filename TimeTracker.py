@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request, send_file, render_template, send_from_directory
 import sqlite3
 import socket
+import zipfile
 import subprocess
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -1473,9 +1474,43 @@ def export_expenses_csv():
     end_date = request.args.get('end_date')
     conn = get_conn()
     cur = conn.cursor()
-    q = '''SELECT e.id, e.expense_date, e.vendor, e.amount, e.category,
-                  c.name as client_name, e.project, e.description,
-                  e.reimbursable, e.source
+    q, params = _expense_query(client_id, start_date, end_date)
+    cur.execute(q, params)
+    rows = cur.fetchall()
+    conn.close()
+    # Build a receipt index so CSV row numbers match the zip filenames
+    receipt_idx = {}
+    receipt_counter = 1
+    for r in rows:
+        if r['receipt_path']:
+            receipt_idx[r['id']] = receipt_counter
+            receipt_counter += 1
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(['id', 'date', 'vendor', 'amount', 'category',
+                     'client', 'project', 'description', 'reimbursable', 'source', 'receipt_file'])
+    for r in rows:
+        ref = _receipt_ref_name(receipt_idx[r['id']], r) if r['id'] in receipt_idx else ''
+        writer.writerow([r['id'], r['expense_date'], r['vendor'], r['amount'],
+                         r['category'], r['client_name'] or '', r['project'] or '',
+                         r['description'] or '', 'yes' if r['reimbursable'] else 'no',
+                         r['source'] or '', ref])
+    output.seek(0)
+    return send_file(io.BytesIO(output.getvalue().encode('utf-8')),
+                     mimetype='text/csv', as_attachment=True,
+                     download_name='expenses.csv')
+
+
+def _receipt_ref_name(idx, expense):
+    """Return a stable, human-readable filename for a receipt, e.g. 001_2026-02-15_Amazon_45.00.jpg"""
+    vendor_slug = re.sub(r'[^A-Za-z0-9]+', '_', (expense['vendor'] or 'unknown')).strip('_')[:30]
+    ext = Path(expense['receipt_path']).suffix.lower()
+    return f"{idx:03d}_{expense['expense_date']}_{vendor_slug}_{expense['amount']:.2f}{ext}"
+
+
+def _expense_query(client_id, start_date, end_date):
+    """Shared filtered/sorted expense query used by export, report, and zip endpoints."""
+    q = '''SELECT e.*, c.name as client_name
            FROM expenses e
            LEFT JOIN clients c ON e.client_id = c.id
            WHERE 1=1'''
@@ -1490,22 +1525,32 @@ def export_expenses_csv():
         q += ' AND e.expense_date <= ?'
         params.append(end_date)
     q += ' ORDER BY e.expense_date, e.id'
+    return q, params
+
+
+@app.route('/api/expenses/receipts-zip')
+def download_receipts_zip():
+    client_id = request.args.get('client_id')
+    start_date = request.args.get('start_date')
+    end_date = request.args.get('end_date')
+    conn = get_conn()
+    cur = conn.cursor()
+    q, params = _expense_query(client_id, start_date, end_date)
     cur.execute(q, params)
-    rows = cur.fetchall()
+    expenses = [e for e in cur.fetchall() if e['receipt_path']]
     conn.close()
-    output = io.StringIO()
-    writer = csv.writer(output)
-    writer.writerow(['id', 'date', 'vendor', 'amount', 'category',
-                     'client', 'project', 'description', 'reimbursable', 'source'])
-    for r in rows:
-        writer.writerow([r['id'], r['expense_date'], r['vendor'], r['amount'],
-                         r['category'], r['client_name'] or '', r['project'] or '',
-                         r['description'] or '', 'yes' if r['reimbursable'] else 'no',
-                         r['source'] or ''])
-    output.seek(0)
-    return send_file(io.BytesIO(output.getvalue().encode('utf-8')),
-                     mimetype='text/csv', as_attachment=True,
-                     download_name='expenses.csv')
+    if not expenses:
+        return jsonify({'error': 'No receipts found for the selected filters'}), 404
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zf:
+        for idx, exp in enumerate(expenses, 1):
+            src = APP_ROOT / exp['receipt_path']
+            if src.exists():
+                zf.write(str(src), _receipt_ref_name(idx, exp))
+    buf.seek(0)
+    from datetime import date as _date
+    filename = f"receipts_{_date.today()}.zip"
+    return send_file(buf, mimetype='application/zip', as_attachment=True, download_name=filename)
 
 
 @app.route('/api/expenses/report')
@@ -1522,27 +1567,22 @@ def generate_expense_report():
         cur.execute('SELECT * FROM clients WHERE id = ?', (int(client_id),))
         client = cur.fetchone()
 
-    q = '''SELECT e.*, c.name as client_name
-           FROM expenses e
-           LEFT JOIN clients c ON e.client_id = c.id
-           WHERE 1=1'''
-    params = []
-    if client_id:
-        q += ' AND e.client_id = ?'
-        params.append(int(client_id))
-    if start_date:
-        q += ' AND e.expense_date >= ?'
-        params.append(start_date)
-    if end_date:
-        q += ' AND e.expense_date <= ?'
-        params.append(end_date)
-    q += ' ORDER BY e.expense_date, e.id'
+    q, params = _expense_query(client_id, start_date, end_date)
     cur.execute(q, params)
     expenses = cur.fetchall()
     conn.close()
 
     if not expenses:
         return jsonify({'error': 'No expenses found for the selected filters'}), 404
+
+    # Build receipt index (only expenses that have a receipt get a number)
+    receipt_idx = {}
+    receipt_counter = 1
+    for e in expenses:
+        if e['receipt_path']:
+            receipt_idx[e['id']] = receipt_counter
+            receipt_counter += 1
+    has_receipts = bool(receipt_idx)
 
     total = round(sum(e['amount'] for e in expenses), 2)
     report_date = datetime.now().date()
@@ -1608,12 +1648,20 @@ def generate_expense_report():
     # Expense table — include Client column only when not filtered by client
     # Usable page width = 612 - 72*2 = 468pt
     show_client = not client_id
-    if show_client:
-        headers = ['Date', 'Vendor', 'Category', 'Client', 'Project', 'Description', 'Amount']
-        col_widths = [55, 88, 58, 65, 52, 100, 50]  # total = 468
+    if show_client and has_receipts:
+        headers    = ['Date', 'Vendor', 'Category', 'Client', 'Amount', '#']
+        col_widths = [65, 115, 75, 133, 50, 30]  # total = 468
+    elif show_client:
+        headers    = ['Date', 'Vendor', 'Category', 'Client', 'Amount']
+        col_widths = [65, 130, 75, 148, 50]       # total = 468
+    elif has_receipts:
+        headers    = ['Date', 'Vendor', 'Category', 'Amount', '#']
+        col_widths = [65, 165, 158, 50, 30]        # total = 468
     else:
-        headers = ['Date', 'Vendor', 'Category', 'Project', 'Description', 'Amount']
-        col_widths = [58, 100, 65, 68, 127, 50]  # total = 468
+        headers    = ['Date', 'Vendor', 'Category', 'Amount']
+        col_widths = [65, 175, 178, 50]            # total = 468
+
+    amt_col = headers.index('Amount')
 
     edata = [headers]
     for e in expenses:
@@ -1624,24 +1672,31 @@ def generate_expense_report():
         ]
         if show_client:
             row.append(Paragraph(e['client_name'] or '', styles['Normal']))
-        row += [e['project'] or '', Paragraph(e['description'] or '', styles['Normal']), f"${e['amount']:.2f}"]
+        row.append(f"${e['amount']:.2f}")
+        if has_receipts:
+            row.append(f"{receipt_idx[e['id']]:03d}" if e['id'] in receipt_idx else '')
         edata.append(row)
 
-    total_label_offset = -2 if show_client else -2
-    blank_cols = len(headers) - 2
-    edata.append([''] * blank_cols + ['Total:', f"${total:.2f}"])
+    # Total row: label in column before Amount, value in Amount, blank thereafter
+    total_row = [''] * len(headers)
+    total_row[amt_col - 1] = 'Total:'
+    total_row[amt_col] = f"${total:.2f}"
+    edata.append(total_row)
 
-    etable = Table(edata, colWidths=col_widths)
-    etable.setStyle(TableStyle([
+    style_cmds = [
         ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
         ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-        ('ALIGN', (-1, 0), (-1, -1), 'RIGHT'),
+        ('ALIGN', (amt_col, 0), (amt_col, -1), 'RIGHT'),
         ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
         ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
         ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-    ]))
+    ]
+    if has_receipts:
+        style_cmds.append(('ALIGN', (-1, 0), (-1, -1), 'CENTER'))
+    etable = Table(edata, colWidths=col_widths)
+    etable.setStyle(TableStyle(style_cmds))
     story.append(etable)
     story.append(Spacer(1, 12))
 
@@ -1860,14 +1915,17 @@ def generate_invoice(client_id):
     expense_total = round(sum(e['amount'] for e in reimbursable_expenses), 2)
     grand_total = round(total_amount + expense_total, 2)
 
-    # Date range
+    # Date range — prefer user-specified dates for the billing period display
     if entries:
-        start_dates = [datetime.fromisoformat(e['start_ts']).date() for e in entries]
-        min_date = min(start_dates)
-        max_date = max(start_dates)
-        date_range = f"{min_date} to {max_date}"
+        entry_dates = [datetime.fromisoformat(e['start_ts']).date() for e in entries]
+        actual_start = min(entry_dates)
+        actual_end = max(entry_dates)
     else:
-        date_range = str(datetime.now().date())
+        actual_start = actual_end = datetime.now().date()
+
+    display_start = datetime.fromisoformat(start_date).date() if start_date else actual_start
+    display_end = datetime.fromisoformat(end_date).date() if end_date else actual_end
+    date_range = f"{display_start} to {display_end}"
 
     # Invoice number based on folder and DB
     invoices_files = glob.glob('invoices/INV-*.pdf')
@@ -1950,6 +2008,7 @@ def generate_invoice(client_id):
     # Invoice details
     data = [
         ['Invoice Date:', str(invoice_date), 'Due Date:', str(due_date)],
+        ['Billing Period:', str(display_start), 'to:', str(display_end)],
     ]
     table = Table(data, colWidths=[100, 100, 100, 100])
     table.setStyle(TableStyle([
