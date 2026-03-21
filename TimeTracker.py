@@ -47,27 +47,74 @@ ALLOWED_RECEIPT_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.webp', '.pdf'}
 
 app = Flask(__name__, static_folder=str(APP_ROOT / 'static'), template_folder=str(APP_ROOT / 'templates'))
 
+_sync_status = {
+    'last_sync': None,
+    'success': None,
+    'error': None,
+    'local_commit': None,
+    'remote_commit': None,
+    'in_sync': None,
+}
+
 def git_sync(message="Sync database"):
     """Sync the database file with the git repository."""
+    global _sync_status
     if not os.path.exists(DB_PATH):
         return
     try:
         # Check if we are in a git repo
         subprocess.run(['git', 'rev-parse', '--is-inside-work-tree'], check=True, capture_output=True, cwd=APP_ROOT)
-        
+
         # Commit local changes first to avoid "cannot pull with unstaged changes"
-        subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
+        subprocess.run(['git', 'add', str(DB_PATH)], check=True, capture_output=True, cwd=APP_ROOT)
         status = subprocess.run(['git', 'status', '--porcelain', str(DB_PATH)], check=True, capture_output=True, text=True, cwd=APP_ROOT)
         if status.stdout.strip():
-            subprocess.run(['git', 'commit', '-m', message], check=True, cwd=APP_ROOT)
+            subprocess.run(['git', 'commit', '-m', message], check=True, capture_output=True, cwd=APP_ROOT)
 
         # Pull latest changes
-        subprocess.run(['git', 'pull', '--rebase'], check=True, cwd=APP_ROOT)
+        subprocess.run(['git', 'pull', '--rebase'], check=True, capture_output=True, text=True, cwd=APP_ROOT)
 
         # Push to origin
-        subprocess.run(['git', 'push'], check=True, cwd=APP_ROOT)
+        push = subprocess.run(['git', 'push'], capture_output=True, text=True, cwd=APP_ROOT)
+        if push.returncode != 0:
+            raise subprocess.CalledProcessError(push.returncode, ['git', 'push'], push.stdout, push.stderr)
+
+        # Verify push succeeded by comparing local HEAD to remote HEAD
+        local_commit = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True, cwd=APP_ROOT).stdout.strip()
+        ls_remote = subprocess.run(['git', 'ls-remote', 'origin', 'HEAD'], check=True, capture_output=True, text=True, cwd=APP_ROOT).stdout.strip()
+        remote_commit = ls_remote.split()[0] if ls_remote else None
+
+        in_sync = remote_commit is not None and local_commit == remote_commit
+        if not in_sync:
+            app.logger.warning(f"Push verification failed: local={local_commit[:8]} remote={remote_commit[:8] if remote_commit else 'unknown'}")
+
+        _sync_status.update({
+            'last_sync': datetime.utcnow().isoformat() + 'Z',
+            'success': in_sync,
+            'error': None if in_sync else f"Push verification failed: local {local_commit[:8]} != remote {remote_commit[:8] if remote_commit else 'unknown'}",
+            'local_commit': local_commit[:8],
+            'remote_commit': remote_commit[:8] if remote_commit else None,
+            'in_sync': in_sync,
+        })
+
+    except subprocess.CalledProcessError as e:
+        stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode() if e.stderr else '')
+        cmd = ' '.join(e.cmd) if isinstance(e.cmd, list) else str(e.cmd)
+        app.logger.error(f"Git sync failed at '{cmd}': {stderr.strip()}")
+        _sync_status.update({
+            'last_sync': datetime.utcnow().isoformat() + 'Z',
+            'success': False,
+            'error': f"'{cmd}' failed: {stderr.strip() or 'unknown error'}",
+            'in_sync': False,
+        })
     except Exception as e:
         app.logger.error(f"Git sync failed: {e}")
+        _sync_status.update({
+            'last_sync': datetime.utcnow().isoformat() + 'Z',
+            'success': False,
+            'error': str(e),
+            'in_sync': False,
+        })
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
@@ -2177,6 +2224,17 @@ def attach_receipt(expense_id):
     conn.commit()
     conn.close()
     return jsonify({'receipt_path': receipt_path})
+
+
+@app.route('/sync-status')
+def sync_status():
+    return jsonify(_sync_status)
+
+
+@app.route('/sync-now', methods=['POST'])
+def sync_now():
+    git_sync("Manual sync")
+    return jsonify(_sync_status)
 
 
 @app.route('/uploads/<path:filename>')

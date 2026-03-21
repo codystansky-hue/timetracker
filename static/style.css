@@ -72,6 +72,48 @@ body {
     background: rgba(122, 162, 247, 0.12);
 }
 
+/* ── Sync indicator ─────────────────────────────────────────────────────── */
+
+.sync-indicator {
+    margin-left: auto;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 0.78rem;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    transition: border-color 0.15s, background 0.15s;
+}
+
+.sync-indicator:hover {
+    border-color: var(--border);
+    background: rgba(255,255,255,0.04);
+}
+
+.sync-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--text-muted);
+    flex-shrink: 0;
+    transition: background 0.3s;
+}
+
+.sync-indicator.synced .sync-dot  { background: var(--success); }
+.sync-indicator.synced .sync-label { color: var(--success); }
+.sync-indicator.error .sync-dot   { background: var(--error); }
+.sync-indicator.error .sync-label  { color: var(--error); }
+.sync-indicator.syncing .sync-dot  { background: var(--warning); animation: pulse 1s infinite; }
+.sync-indicator.syncing .sync-label { color: var(--warning); }
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.3; }
+}
+
 /* ── Pagination ──────────────────────────────────────────────────────────── */
 
 .section-header {

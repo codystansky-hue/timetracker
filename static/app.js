@@ -762,6 +762,56 @@ fetch('/qr.png', { method: 'HEAD' }).then(() => {
 
 loadAll();
 
+// ── Sync status indicator ─────────────────────────────────────────────────
+
+const syncEl = document.getElementById('syncIndicator');
+const syncDot = syncEl.querySelector('.sync-dot');
+const syncLabel = syncEl.querySelector('.sync-label');
+
+function renderSyncStatus(s) {
+  syncEl.classList.remove('synced', 'error', 'syncing');
+  if (s.in_sync === true) {
+    syncEl.classList.add('synced');
+    syncLabel.textContent = `✓ ${s.local_commit}`;
+    syncEl.title = `In sync with remote\nCommit: ${s.local_commit}\nLast sync: ${s.last_sync ? new Date(s.last_sync).toLocaleString() : '—'}\nClick to sync now`;
+  } else if (s.success === false && s.last_sync) {
+    syncEl.classList.add('error');
+    syncLabel.textContent = `✗ ${s.local_commit || '?'}`;
+    syncEl.title = `Sync error: ${s.error}\nClick to retry`;
+  } else if (s.last_sync === null) {
+    syncLabel.textContent = '—';
+    syncEl.title = 'Sync status unknown — click to sync now';
+  } else {
+    syncEl.classList.add('error');
+    syncLabel.textContent = `✗ ${s.local_commit || '?'}`;
+    syncEl.title = `Out of sync: local ${s.local_commit} / remote ${s.remote_commit}\nClick to sync now`;
+  }
+}
+
+async function fetchSyncStatus() {
+  try {
+    const s = await api('/sync-status');
+    renderSyncStatus(s);
+  } catch (_) {}
+}
+
+syncEl.addEventListener('click', async () => {
+  syncEl.classList.remove('synced', 'error');
+  syncEl.classList.add('syncing');
+  syncLabel.textContent = 'Syncing…';
+  try {
+    const s = await api('/sync-now', 'POST');
+    renderSyncStatus(s);
+  } catch (_) {
+    syncEl.classList.remove('syncing');
+    syncEl.classList.add('error');
+    syncLabel.textContent = '✗ failed';
+  }
+});
+
+fetchSyncStatus();
+setInterval(fetchSyncStatus, 60000);
+
 // PWA service worker
 if ('serviceWorker' in navigator) {
   navigator.serviceWorker.register('/sw.js').catch(() => {});
