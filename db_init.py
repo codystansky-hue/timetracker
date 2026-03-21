@@ -25,12 +25,19 @@ def init_db():
         start_ts TEXT NOT NULL,
         end_ts TEXT,
         duration_min INTEGER,
-        FOREIGN KEY (client_id) REFERENCES clients (id)
+        invoice_id INTEGER,
+        FOREIGN KEY (client_id) REFERENCES clients (id),
+        FOREIGN KEY (invoice_id) REFERENCES invoices(id)
     )
     ''')
     # Add client_id column if it doesn't exist
     try:
         cur.execute('ALTER TABLE entries ADD COLUMN client_id INTEGER REFERENCES clients(id)')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+    # Add invoice_id column if it doesn't exist
+    try:
+        cur.execute('ALTER TABLE entries ADD COLUMN invoice_id INTEGER REFERENCES invoices(id)')
     except sqlite3.OperationalError:
         pass  # Column already exists
     cur.execute('''

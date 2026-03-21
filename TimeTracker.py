@@ -129,7 +129,7 @@ def index():
 def entries():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT * FROM entries ORDER BY id DESC')
+    cur.execute('SELECT * FROM entries ORDER BY start_ts DESC')
     rows = [dict(x) for x in cur.fetchall()]
     conn.close()
     return jsonify(rows)
@@ -1921,7 +1921,7 @@ def generate_invoice(client_id):
         return jsonify({'error': 'Client not found'}), 404
 
     # Get time entries, optionally filtered by date range
-    entry_q = 'SELECT * FROM entries WHERE client_id = ? AND duration_min IS NOT NULL'
+    entry_q = 'SELECT * FROM entries WHERE client_id = ? AND duration_min IS NOT NULL AND invoice_id IS NULL'
     entry_p = [client_id]
     if start_date:
         entry_q += ' AND DATE(start_ts) >= ?'
@@ -1950,7 +1950,7 @@ def generate_invoice(client_id):
 
     if not entries and not reimbursable_expenses:
         conn.close()
-        return jsonify({'error': 'No time entries or reimbursable expenses for client'}), 404
+        return jsonify({'error': 'No unbilled time entries or reimbursable expenses for client'}), 404
 
     # Calculate time totals
     total_min = sum(e['duration_min'] for e in entries) if entries else 0
@@ -1968,13 +1968,18 @@ def generate_invoice(client_id):
         actual_start = min(entry_dates)
         actual_end = max(entry_dates)
     else:
-        actual_start = actual_end = datetime.now().date()
+        # Fall back to expense dates if no time entries
+        exp_dates = [datetime.strptime(e['expense_date'], '%Y-%m-%d').date() for e in reimbursable_expenses]
+        actual_start = min(exp_dates) if exp_dates else datetime.now().date()
+        actual_end = max(exp_dates) if exp_dates else datetime.now().date()
 
     display_start = datetime.fromisoformat(start_date).date() if start_date else actual_start
     display_end = datetime.fromisoformat(end_date).date() if end_date else actual_end
     date_range = f"{display_start} to {display_end}"
 
     # Invoice number based on folder and DB
+    invoices_dir = Path('invoices')
+    invoices_dir.mkdir(exist_ok=True)
     invoices_files = glob.glob('invoices/INV-*.pdf')
     file_nums = [int(f.split('-')[1].split('.')[0]) for f in invoices_files] if invoices_files else [0]
     max_file = max(file_nums)
@@ -2000,6 +2005,17 @@ def generate_invoice(client_id):
               total_hours, total_amount, expense_total))
         conn.commit()
         invoice_id = cur.lastrowid
+        
+        # Link entries to invoice
+        if entries:
+            entry_ids = [e['id'] for e in entries]
+            placeholders = ','.join('?' * len(entry_ids))
+            cur.execute(
+                f'UPDATE entries SET invoice_id = ? WHERE id IN ({placeholders})',
+                [invoice_id] + entry_ids,
+            )
+        
+        # Link expenses to invoice
         if reimbursable_expenses:
             exp_ids = [e['id'] for e in reimbursable_expenses]
             placeholders = ','.join('?' * len(exp_ids))
@@ -2007,7 +2023,7 @@ def generate_invoice(client_id):
                 f'UPDATE expenses SET invoice_id = ? WHERE id IN ({placeholders})',
                 [invoice_id] + exp_ids,
             )
-            conn.commit()
+        conn.commit()
     conn.close()
     if not draft:
         git_sync(f"Generated invoice: {invoice_number}")
