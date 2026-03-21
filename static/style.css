@@ -273,6 +273,12 @@ td {
     font-weight: bold;
 }
 
+.status-badge.billed {
+    background: rgba(122, 162, 247, 0.12);
+    color: var(--accent);
+    border: 1px solid var(--accent);
+}
+
 .active-row {
     background-color: var(--active-row);
 }

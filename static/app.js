@@ -67,7 +67,7 @@ function renderEntriesPage() {
       <td class="editable" data-field="start_ts" data-raw="${e.start_ts || ''}">${formatDate(e.start_ts)}</td>
       <td class="editable" data-field="end_ts" data-raw="${e.end_ts || ''}">${formatDate(e.end_ts)}</td>
       <td class="duration-cell" data-start="${e.start_ts}">${e.duration_min || '0'}</td>
-      <td>${isActive ? '<span class="status-badge active">● Active</span>' : '<span class="status-badge">Done</span>'}</td>
+      <td>${isActive ? '<span class="status-badge active">● Active</span>' : e.invoice_id ? '<span class="status-badge billed">Billed</span>' : '<span class="status-badge">Done</span>'}</td>
       <td><button data-id="${e.id}" class="del">Delete</button></td>
     `;
     tbody.appendChild(tr);
