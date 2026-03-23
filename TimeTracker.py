@@ -71,13 +71,39 @@ def git_sync(message="Sync database"):
         if status.stdout.strip():
             subprocess.run(['git', 'commit', '-m', message], check=True, capture_output=True, cwd=APP_ROOT)
 
-        # Pull latest changes
-        subprocess.run(['git', 'pull', '--rebase'], check=True, capture_output=True, text=True, cwd=APP_ROOT)
+        # Determine current branch — skip pull/push if in detached HEAD
+        branch_result = subprocess.run(
+            ['git', 'symbolic-ref', '--short', 'HEAD'],
+            capture_output=True, text=True, cwd=APP_ROOT
+        )
+        branch = branch_result.stdout.strip()
+        if not branch:
+            app.logger.warning("Git sync skipped pull/push: not on a branch (detached HEAD).")
+            return
+
+        # Stash any other unstaged changes so rebase doesn't fail
+        stash = subprocess.run(['git', 'stash'], capture_output=True, text=True, cwd=APP_ROOT)
+        stashed = 'No local changes to save' not in stash.stdout
+
+        # Pull latest changes; on binary DB conflict, keep our version (most recent data)
+        pull = subprocess.run(['git', 'pull', '--rebase', 'origin', branch],
+                              capture_output=True, text=True, cwd=APP_ROOT)
+        if pull.returncode != 0:
+            if 'CONFLICT' in pull.stdout or 'CONFLICT' in pull.stderr:
+                subprocess.run(['git', 'checkout', '--theirs', str(DB_PATH)], check=True, cwd=APP_ROOT)
+                subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
+                subprocess.run(['git', 'rebase', '--continue'], check=True,
+                               cwd=APP_ROOT, env={**os.environ, 'GIT_EDITOR': 'true'})
+            else:
+                raise subprocess.CalledProcessError(pull.returncode, pull.args, pull.stdout, pull.stderr)
+
+        if stashed:
+            subprocess.run(['git', 'stash', 'pop'], cwd=APP_ROOT)
 
         # Push to origin
-        push = subprocess.run(['git', 'push'], capture_output=True, text=True, cwd=APP_ROOT)
+        push = subprocess.run(['git', 'push', 'origin', branch], capture_output=True, text=True, cwd=APP_ROOT)
         if push.returncode != 0:
-            raise subprocess.CalledProcessError(push.returncode, ['git', 'push'], push.stdout, push.stderr)
+            raise subprocess.CalledProcessError(push.returncode, ['git', 'push', 'origin', branch], push.stdout, push.stderr)
 
         # Verify push succeeded by comparing local HEAD to remote HEAD
         local_commit = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True, cwd=APP_ROOT).stdout.strip()
