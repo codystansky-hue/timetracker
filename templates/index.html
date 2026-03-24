@@ -18,6 +18,7 @@
       <div class="nav-links">
         <button class="nav-btn active" data-section="tracking">Time Tracking</button>
         <button class="nav-btn" data-section="expenses">Expenses</button>
+        <button class="nav-btn" data-section="invoices">Invoices</button>
         <button class="nav-btn" data-section="settings">Settings</button>
       </div>
       <div id="syncIndicator" class="sync-indicator" title="Click to sync now">
@@ -166,6 +167,28 @@
               <th>ID</th><th>Date</th><th>Vendor</th><th>Amount</th>
               <th>Category</th><th>Client</th><th>Project</th>
               <th>Reimb?</th><th>Source</th><th>Receipt</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- ── Invoices ───────────────────────────────────────────── -->
+      <div id="section-invoices" class="section" style="display:none">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h2 style="margin:0">Invoices</h2>
+        </div>
+        <table id="invoicesTable">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Invoice #</th>
+              <th>Client</th>
+              <th>Date</th>
+              <th>Due Date</th>
+              <th>Total</th>
+              <th>Status</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody></tbody>

@@ -2267,6 +2267,52 @@ def attach_receipt(expense_id):
     conn.close()
     return jsonify({'receipt_path': receipt_path})
 
+@app.route('/api/invoices', methods=['GET'])
+def get_invoices():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT i.*, c.name as client_name 
+        FROM invoices i
+        LEFT JOIN clients c ON i.client_id = c.id
+        ORDER BY i.id DESC
+    ''')
+    rows = [dict(x) for x in cur.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/invoices/<int:invoice_id>', methods=['PUT'])
+def update_invoice(invoice_id):
+    data = request.json or {}
+    status = data.get('status')
+    if not status:
+        return jsonify({'error': 'status required'}), 400
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('UPDATE invoices SET status = ? WHERE id = ?', (status, invoice_id))
+    conn.commit()
+    conn.close()
+    git_sync(f"Updated invoice status: {invoice_id} to {status}")
+    return jsonify({'updated': invoice_id, 'status': status})
+
+@app.route('/api/invoices/<int:invoice_id>/download', methods=['GET'])
+def download_invoice(invoice_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT invoice_number FROM invoices WHERE id = ?', (invoice_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'Invoice not found'}), 404
+        
+    invoice_number = row['invoice_number']
+    pdf_path = APP_ROOT / 'invoices' / f'{invoice_number}.pdf'
+    
+    if not pdf_path.exists():
+        return jsonify({'error': 'PDF file not found'}), 404
+        
+    return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{invoice_number}.pdf')
+
 
 @app.route('/sync-status')
 def sync_status():
@@ -2292,4 +2338,4 @@ def service_worker():
 if __name__ == '__main__':
     print("Performing initial git sync...")
     git_sync("Startup sync")
-    app.run(debug=True, host='0.0.0.0')
+    app.run(debug=True, host='0.0.0.0', port=5001)

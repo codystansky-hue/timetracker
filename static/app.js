@@ -538,6 +538,7 @@ document.getElementById('expBulkApplyDate').addEventListener('click', async () =
   const ids = getCheckedExpenseIds();
   await Promise.all(ids.map(id => api(`/api/expenses/${id}`, 'PUT', { expense_date: date })));
   loadExpenses();
+  loadInvoices();
 });
 
 // Bulk apply client
@@ -546,6 +547,7 @@ document.getElementById('expBulkApplyClient').addEventListener('click', async ()
   const ids = getCheckedExpenseIds();
   await Promise.all(ids.map(id => api(`/api/expenses/${id}`, 'PUT', { client_id: clientId })));
   loadExpenses();
+  loadInvoices();
 });
 
 // Clear selection
@@ -752,6 +754,7 @@ async function loadAll() {
   loadEntries();
   loadProjectsSummary();
   loadExpenses();
+  loadInvoices();
 }
 
 // Show the LAN URL next to the QR code in Settings
@@ -826,3 +829,45 @@ setInterval(() => {
     cell.textContent = Math.floor((now - start) / 60000);
   });
 }, 30000);
+
+
+// ── Invoices ──────────────────────────────────────────────────────────────────
+
+async function loadInvoices() {
+  const data = await api('/api/invoices');
+  const tbody = document.querySelector('#invoicesTable tbody');
+  if (!tbody) return;
+  tbody.innerHTML = '';
+  data.forEach(inv => {
+    const tr = document.createElement('tr');
+    tr.dataset.id = inv.id;
+    const isPaid = inv.status === 'paid';
+    const total = parseFloat(inv.total_amount || 0) + parseFloat(inv.expense_total || 0);
+    tr.innerHTML = `
+      <td>${inv.id}</td>
+      <td>${inv.invoice_number}</td>
+      <td>${inv.client_name || '—'}</td>
+      <td>${inv.invoice_date}</td>
+      <td>${inv.due_date}</td>
+      <td>$${total.toFixed(2)}</td>
+      <td>${isPaid ? 'Paid' : 'Unpaid'}</td>
+      <td>
+        <label class="inline-check">
+          <input type="checkbox" class="invoice-status-cb" data-id="${inv.id}" ${isPaid ? 'checked' : ''} />
+          Paid
+        </label>
+        <a href="/api/invoices/${inv.id}/download" target="_blank" class="btn-secondary" style="margin-left:8px;padding:4px 8px;text-decoration:none;font-size:0.85rem">PDF</a>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+
+  document.querySelectorAll('.invoice-status-cb').forEach(cb => {
+    cb.addEventListener('change', async ev => {
+      const id = ev.target.dataset.id;
+      const newStatus = ev.target.checked ? 'paid' : 'unpaid';
+      await api('/api/invoices/' + id, 'PUT', { status: newStatus });
+      loadInvoices();
+    });
+  });
+}
