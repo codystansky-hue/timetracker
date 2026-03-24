@@ -144,10 +144,31 @@ function renderEntriesPage() {
 }
 
 async function loadEntries() {
-  allEntries = await api('/api/entries');
+  const filterClientId = document.getElementById('filterClient').value;
+  const filterStartDate = document.getElementById('filterStartDate').value;
+  const filterEndDate = document.getElementById('filterEndDate').value;
+  const filterStatus = document.getElementById('filterStatus').value;
+  
+  let url = '/api/entries?';
+  const params = new URLSearchParams();
+  if (filterClientId) params.append('client_id', filterClientId);
+  if (filterStartDate) params.append('start_date', filterStartDate);
+  if (filterEndDate) params.append('end_date', filterEndDate);
+  if (filterStatus && filterStatus !== 'all') params.append('status', filterStatus);
+  
+  allEntries = await api(url + params.toString());
   currentPage = 1;
   renderEntriesPage();
 }
+
+document.getElementById('applyFilterBtn').addEventListener('click', loadEntries);
+document.getElementById('clearFilterBtn').addEventListener('click', () => {
+  document.getElementById('filterClient').value = '';
+  document.getElementById('filterStartDate').value = '';
+  document.getElementById('filterEndDate').value = '';
+  document.getElementById('filterStatus').value = 'all';
+  loadEntries();
+});
 
 document.getElementById('prevPage').addEventListener('click', () => {
   if (currentPage > 1) { currentPage--; renderEntriesPage(); }
@@ -173,6 +194,20 @@ async function loadClients() {
   });
   const lastClient = localStorage.getItem('lastClient');
   if (lastClient) select.value = lastClient;
+
+  
+  const filterClient = document.getElementById('filterClient');
+  if (filterClient) {
+    const currentFilterClient = filterClient.value;
+    filterClient.innerHTML = '<option value="">All Clients</option>';
+    clients.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      filterClient.appendChild(opt);
+    });
+    if (currentFilterClient) filterClient.value = currentFilterClient;
+  }
 
   // Expense client dropdowns
   ['expClientSelect', 'mClientSelect'].forEach(id => {

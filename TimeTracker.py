@@ -155,7 +155,34 @@ def index():
 def entries():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT * FROM entries ORDER BY start_ts DESC')
+    
+    query = 'SELECT * FROM entries WHERE 1=1'
+    params = []
+    
+    client_id = request.args.get('client_id')
+    if client_id:
+        query += ' AND client_id = ?'
+        params.append(client_id)
+        
+    start_date = request.args.get('start_date')
+    if start_date:
+        query += ' AND start_ts >= ?'
+        params.append(start_date)
+        
+    end_date = request.args.get('end_date')
+    if end_date:
+        query += ' AND start_ts <= ?'
+        params.append(end_date + 'T23:59:59.999999')
+        
+    status = request.args.get('status')
+    if status == 'billed':
+        query += ' AND invoice_id IS NOT NULL'
+    elif status == 'unbilled':
+        query += ' AND invoice_id IS NULL'
+        
+    query += ' ORDER BY start_ts DESC'
+    
+    cur.execute(query, params)
     rows = [dict(x) for x in cur.fetchall()]
     conn.close()
     return jsonify(rows)

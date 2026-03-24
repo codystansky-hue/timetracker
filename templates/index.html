@@ -40,6 +40,21 @@
           <button id="exportBtn">Export CSV</button>
         </div>
 
+        
+        <div class="controls filter-bar" style="margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px;">
+          <strong>Filter Entries:</strong>
+          <select id="filterClient"><option value="">All Clients</option></select>
+          <input type="date" id="filterStartDate" title="Start Date">
+          <input type="date" id="filterEndDate" title="End Date">
+          <select id="filterStatus">
+            <option value="all">All</option>
+            <option value="billed">Billed</option>
+            <option value="unbilled">Unbilled</option>
+          </select>
+          <button id="applyFilterBtn">Apply Filter</button>
+          <button id="clearFilterBtn">Clear Filter</button>
+        </div>
+
         <div class="section-header">
           <h2>Entries</h2>
           <div class="pagination-bar">
