@@ -71,13 +71,39 @@ def git_sync(message="Sync database"):
         if status.stdout.strip():
             subprocess.run(['git', 'commit', '-m', message], check=True, capture_output=True, cwd=APP_ROOT)
 
-        # Pull latest changes
-        subprocess.run(['git', 'pull', '--rebase'], check=True, capture_output=True, text=True, cwd=APP_ROOT)
+        # Determine current branch — skip pull/push if in detached HEAD
+        branch_result = subprocess.run(
+            ['git', 'symbolic-ref', '--short', 'HEAD'],
+            capture_output=True, text=True, cwd=APP_ROOT
+        )
+        branch = branch_result.stdout.strip()
+        if not branch:
+            app.logger.warning("Git sync skipped pull/push: not on a branch (detached HEAD).")
+            return
+
+        # Stash any other unstaged changes so rebase doesn't fail
+        stash = subprocess.run(['git', 'stash'], capture_output=True, text=True, cwd=APP_ROOT)
+        stashed = 'No local changes to save' not in stash.stdout
+
+        # Pull latest changes; on binary DB conflict, keep our version (most recent data)
+        pull = subprocess.run(['git', 'pull', '--rebase', 'origin', branch],
+                              capture_output=True, text=True, cwd=APP_ROOT)
+        if pull.returncode != 0:
+            if 'CONFLICT' in pull.stdout or 'CONFLICT' in pull.stderr:
+                subprocess.run(['git', 'checkout', '--theirs', str(DB_PATH)], check=True, cwd=APP_ROOT)
+                subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
+                subprocess.run(['git', 'rebase', '--continue'], check=True,
+                               cwd=APP_ROOT, env={**os.environ, 'GIT_EDITOR': 'true'})
+            else:
+                raise subprocess.CalledProcessError(pull.returncode, pull.args, pull.stdout, pull.stderr)
+
+        if stashed:
+            subprocess.run(['git', 'stash', 'pop'], cwd=APP_ROOT)
 
         # Push to origin
-        push = subprocess.run(['git', 'push'], capture_output=True, text=True, cwd=APP_ROOT)
+        push = subprocess.run(['git', 'push', 'origin', branch], capture_output=True, text=True, cwd=APP_ROOT)
         if push.returncode != 0:
-            raise subprocess.CalledProcessError(push.returncode, ['git', 'push'], push.stdout, push.stderr)
+            raise subprocess.CalledProcessError(push.returncode, ['git', 'push', 'origin', branch], push.stdout, push.stderr)
 
         # Verify push succeeded by comparing local HEAD to remote HEAD
         local_commit = subprocess.run(['git', 'rev-parse', 'HEAD'], check=True, capture_output=True, text=True, cwd=APP_ROOT).stdout.strip()
@@ -129,7 +155,34 @@ def index():
 def entries():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('SELECT * FROM entries ORDER BY start_ts DESC')
+    
+    query = 'SELECT * FROM entries WHERE 1=1'
+    params = []
+    
+    client_id = request.args.get('client_id')
+    if client_id:
+        query += ' AND client_id = ?'
+        params.append(client_id)
+        
+    start_date = request.args.get('start_date')
+    if start_date:
+        query += ' AND start_ts >= ?'
+        params.append(start_date)
+        
+    end_date = request.args.get('end_date')
+    if end_date:
+        query += ' AND start_ts <= ?'
+        params.append(end_date + 'T23:59:59.999999')
+        
+    status = request.args.get('status')
+    if status == 'billed':
+        query += ' AND invoice_id IS NOT NULL'
+    elif status == 'unbilled':
+        query += ' AND invoice_id IS NULL'
+        
+    query += ' ORDER BY start_ts DESC'
+    
+    cur.execute(query, params)
     rows = [dict(x) for x in cur.fetchall()]
     conn.close()
     return jsonify(rows)
@@ -2241,6 +2294,52 @@ def attach_receipt(expense_id):
     conn.close()
     return jsonify({'receipt_path': receipt_path})
 
+@app.route('/api/invoices', methods=['GET'])
+def get_invoices():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT i.*, c.name as client_name 
+        FROM invoices i
+        LEFT JOIN clients c ON i.client_id = c.id
+        ORDER BY i.id DESC
+    ''')
+    rows = [dict(x) for x in cur.fetchall()]
+    conn.close()
+    return jsonify(rows)
+
+@app.route('/api/invoices/<int:invoice_id>', methods=['PUT'])
+def update_invoice(invoice_id):
+    data = request.json or {}
+    status = data.get('status')
+    if not status:
+        return jsonify({'error': 'status required'}), 400
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('UPDATE invoices SET status = ? WHERE id = ?', (status, invoice_id))
+    conn.commit()
+    conn.close()
+    git_sync(f"Updated invoice status: {invoice_id} to {status}")
+    return jsonify({'updated': invoice_id, 'status': status})
+
+@app.route('/api/invoices/<int:invoice_id>/download', methods=['GET'])
+def download_invoice(invoice_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT invoice_number FROM invoices WHERE id = ?', (invoice_id,))
+    row = cur.fetchone()
+    conn.close()
+    if not row:
+        return jsonify({'error': 'Invoice not found'}), 404
+        
+    invoice_number = row['invoice_number']
+    pdf_path = APP_ROOT / 'invoices' / f'{invoice_number}.pdf'
+    
+    if not pdf_path.exists():
+        return jsonify({'error': 'PDF file not found'}), 404
+        
+    return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{invoice_number}.pdf')
+
 
 @app.route('/sync-status')
 def sync_status():
@@ -2266,4 +2365,4 @@ def service_worker():
 if __name__ == '__main__':
     print("Performing initial git sync...")
     git_sync("Startup sync")
-    app.run(debug=True, host='0.0.0.0')
+    app.run(debug=True, host='0.0.0.0', port=5001)

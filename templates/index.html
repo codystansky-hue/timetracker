@@ -18,6 +18,7 @@
       <div class="nav-links">
         <button class="nav-btn active" data-section="tracking">Time Tracking</button>
         <button class="nav-btn" data-section="expenses">Expenses</button>
+        <button class="nav-btn" data-section="invoices">Invoices</button>
         <button class="nav-btn" data-section="settings">Settings</button>
       </div>
       <div id="syncIndicator" class="sync-indicator" title="Click to sync now">
@@ -37,6 +38,21 @@
           <button id="startBtn">Start</button>
           <button id="stopBtn">Stop</button>
           <button id="exportBtn">Export CSV</button>
+        </div>
+
+        
+        <div class="controls filter-bar" style="margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px;">
+          <strong>Filter Entries:</strong>
+          <select id="filterClient"><option value="">All Clients</option></select>
+          <input type="date" id="filterStartDate" title="Start Date">
+          <input type="date" id="filterEndDate" title="End Date">
+          <select id="filterStatus">
+            <option value="all">All</option>
+            <option value="billed">Billed</option>
+            <option value="unbilled">Unbilled</option>
+          </select>
+          <button id="applyFilterBtn">Apply Filter</button>
+          <button id="clearFilterBtn">Clear Filter</button>
         </div>
 
         <div class="section-header">
@@ -166,6 +182,28 @@
               <th>ID</th><th>Date</th><th>Vendor</th><th>Amount</th>
               <th>Category</th><th>Client</th><th>Project</th>
               <th>Reimb?</th><th>Source</th><th>Receipt</th><th>Action</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <!-- ── Invoices ───────────────────────────────────────────── -->
+      <div id="section-invoices" class="section" style="display:none">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <h2 style="margin:0">Invoices</h2>
+        </div>
+        <table id="invoicesTable">
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Invoice #</th>
+              <th>Client</th>
+              <th>Date</th>
+              <th>Due Date</th>
+              <th>Total</th>
+              <th>Status</th>
+              <th>Action</th>
             </tr>
           </thead>
           <tbody></tbody>
