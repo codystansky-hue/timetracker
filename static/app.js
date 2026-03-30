@@ -15,6 +15,12 @@ function formatDate(isoStr) {
   return isNaN(d) ? isoStr : d.toLocaleString();
 }
 
+function fmtDuration(minutes) {
+  if (!minutes) return '0h';
+  const hrs = Math.round(minutes / 15) * 0.25;
+  return hrs % 1 === 0 ? hrs + 'h' : hrs.toFixed(2) + 'h';
+}
+
 async function api(path, method = 'GET', body) {
   const opts = { method, headers: {} };
   if (body) {
@@ -66,7 +72,7 @@ function renderEntriesPage() {
       <td class="editable" data-field="description">${e.description || ''}</td>
       <td class="editable" data-field="start_ts" data-raw="${e.start_ts || ''}">${formatDate(e.start_ts)}</td>
       <td class="editable" data-field="end_ts" data-raw="${e.end_ts || ''}">${formatDate(e.end_ts)}</td>
-      <td class="duration-cell" data-start="${e.start_ts}">${e.duration_min || '0'}</td>
+      <td class="duration-cell" data-start="${e.start_ts}">${fmtDuration(e.duration_min)}</td>
       <td>${isActive ? '<span class="status-badge active">● Active</span>' : e.invoice_id ? '<span class="status-badge billed">Billed</span>' : '<span class="status-badge">Done</span>'}</td>
       <td><button data-id="${e.id}" class="del">Delete</button></td>
     `;
@@ -861,7 +867,7 @@ setInterval(() => {
     const hastz = startStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(startStr);
     const start = new Date(hastz ? startStr : startStr + 'Z');
     const now = new Date();
-    cell.textContent = Math.floor((now - start) / 60000);
+    cell.textContent = fmtDuration(Math.floor((now - start) / 60000));
   });
 }, 30000);
 
