@@ -81,7 +81,15 @@ def _merge_remote_entries(remote_db_path):
             le_row = lc.fetchone()
 
             if le_row is None:
-                # Not in local DB — insert preserving original ID
+                # Not in local DB — insert preserving original ID, computing duration if missing
+                if re.get('end_ts') and not re.get('duration_min'):
+                    try:
+                        re['duration_min'] = int(
+                            (datetime.fromisoformat(re['end_ts']) - datetime.fromisoformat(re['start_ts']))
+                            .total_seconds() // 60
+                        )
+                    except (ValueError, TypeError):
+                        pass
                 cols = ', '.join(re.keys())
                 placeholders = ', '.join(['?'] * len(re))
                 lc.execute(f'INSERT INTO entries ({cols}) VALUES ({placeholders})', list(re.values()))
@@ -98,6 +106,14 @@ def _merge_remote_entries(remote_db_path):
                     )
                     if lc.fetchone() is None:
                         re_new = {k: v for k, v in re.items() if k != 'id'}
+                        if re_new.get('end_ts') and not re_new.get('duration_min'):
+                            try:
+                                re_new['duration_min'] = int(
+                                    (datetime.fromisoformat(re_new['end_ts']) - datetime.fromisoformat(re_new['start_ts']))
+                                    .total_seconds() // 60
+                                )
+                            except (ValueError, TypeError):
+                                pass
                         cols = ', '.join(re_new.keys())
                         placeholders = ', '.join(['?'] * len(re_new))
                         lc.execute(f'INSERT INTO entries ({cols}) VALUES ({placeholders})', list(re_new.values()))
