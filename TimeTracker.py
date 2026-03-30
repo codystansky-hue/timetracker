@@ -56,6 +56,70 @@ _sync_status = {
     'in_sync': None,
 }
 
+def _merge_remote_entries(remote_db_path):
+    """
+    Merge entries from remote_db_path into the local DB.
+    - Inserts any remote entries missing locally (by ID).
+    - If same ID exists locally but different start_ts (ID collision between machines),
+      inserts the remote entry as a new row with an auto-assigned ID.
+    - Updates end_ts/duration_min locally if remote has it and local doesn't.
+    Returns True if any rows were inserted or updated.
+    """
+    changed = False
+    local_conn = sqlite3.connect(str(DB_PATH))
+    remote_conn = sqlite3.connect(str(remote_db_path))
+    local_conn.row_factory = sqlite3.Row
+    remote_conn.row_factory = sqlite3.Row
+    try:
+        lc = local_conn.cursor()
+        rc = remote_conn.cursor()
+        rc.execute('SELECT * FROM entries ORDER BY id')
+        for re_row in rc.fetchall():
+            re = dict(re_row)
+            rid = re['id']
+            lc.execute('SELECT * FROM entries WHERE id = ?', (rid,))
+            le_row = lc.fetchone()
+
+            if le_row is None:
+                # Not in local DB — insert preserving original ID
+                cols = ', '.join(re.keys())
+                placeholders = ', '.join(['?'] * len(re))
+                lc.execute(f'INSERT INTO entries ({cols}) VALUES ({placeholders})', list(re.values()))
+                app.logger.info(f"DB merge: inserted remote entry {rid} ({re.get('description', '')})")
+                changed = True
+            else:
+                le = dict(le_row)
+                if re.get('start_ts') != le.get('start_ts'):
+                    # Same ID, different entry — ID collision from two machines running independently.
+                    # Check if this remote entry already exists under a different local ID.
+                    lc.execute(
+                        'SELECT id FROM entries WHERE start_ts = ? AND client_id IS ? AND project = ?',
+                        (re['start_ts'], re.get('client_id'), re['project'])
+                    )
+                    if lc.fetchone() is None:
+                        re_new = {k: v for k, v in re.items() if k != 'id'}
+                        cols = ', '.join(re_new.keys())
+                        placeholders = ', '.join(['?'] * len(re_new))
+                        lc.execute(f'INSERT INTO entries ({cols}) VALUES ({placeholders})', list(re_new.values()))
+                        app.logger.info(f"DB merge: ID collision — inserted remote entry {rid} as new row")
+                        changed = True
+                else:
+                    # Same entry — sync end_ts/duration_min if remote has it and local doesn't
+                    if re.get('end_ts') and not le.get('end_ts'):
+                        lc.execute(
+                            'UPDATE entries SET end_ts = ?, duration_min = ? WHERE id = ?',
+                            (re['end_ts'], re.get('duration_min'), rid)
+                        )
+                        app.logger.info(f"DB merge: updated end_ts for entry {rid} from remote")
+                        changed = True
+        if changed:
+            local_conn.commit()
+    finally:
+        local_conn.close()
+        remote_conn.close()
+    return changed
+
+
 def git_sync(message="Sync database"):
     """Sync the database file with the git repository."""
     global _sync_status
@@ -85,7 +149,34 @@ def git_sync(message="Sync database"):
         stash = subprocess.run(['git', 'stash'], capture_output=True, text=True, cwd=APP_ROOT)
         stashed = 'No local changes to save' not in stash.stdout
 
-        # Pull latest changes; on binary DB conflict, keep our version (most recent data)
+        # Fetch remote, then merge its DB entries into local before pulling.
+        # This prevents entries logged on another machine from being silently
+        # dropped when git resolves the binary DB conflict.
+        subprocess.run(['git', 'fetch', 'origin'], check=True, capture_output=True, cwd=APP_ROOT)
+        remote_db_tmp = APP_ROOT / '.remote_db_tmp.db'
+        try:
+            show = subprocess.run(
+                ['git', 'show', f'origin/{branch}:{DB_PATH.name}'],
+                capture_output=True, cwd=APP_ROOT
+            )
+            if show.returncode == 0 and show.stdout:
+                remote_db_tmp.write_bytes(show.stdout)
+                if _merge_remote_entries(remote_db_tmp):
+                    subprocess.run(['git', 'add', str(DB_PATH)], check=True, capture_output=True, cwd=APP_ROOT)
+                    merge_status = subprocess.run(
+                        ['git', 'status', '--porcelain', str(DB_PATH)],
+                        check=True, capture_output=True, text=True, cwd=APP_ROOT
+                    )
+                    if merge_status.stdout.strip():
+                        subprocess.run(
+                            ['git', 'commit', '-m', 'Merge remote entries'],
+                            check=True, capture_output=True, cwd=APP_ROOT
+                        )
+        finally:
+            if remote_db_tmp.exists():
+                remote_db_tmp.unlink()
+
+        # Pull latest changes; on binary DB conflict, keep our version (which now includes remote entries)
         pull = subprocess.run(['git', 'pull', '--rebase', 'origin', branch],
                               capture_output=True, text=True, cwd=APP_ROOT)
         if pull.returncode != 0:
