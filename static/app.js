@@ -121,7 +121,12 @@ function renderEntriesPage() {
         inp.type = 'datetime-local';
         inp.value = localIso;
         inp.style.width = '180px';
-        const save = async () => {
+        let clickingButton = false;
+        document.addEventListener('mousedown', e => {
+          if (e.target.tagName === 'BUTTON') clickingButton = true;
+        }, { capture: true, once: true });
+        const save = async (e) => {
+          if (clickingButton) { clickingButton = false; loadAll(); return; }
           const chosen = inp.value;
           if (!chosen) { loadAll(); return; }
           // Store as UTC ISO string

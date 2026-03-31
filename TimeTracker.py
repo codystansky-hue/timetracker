@@ -366,6 +366,10 @@ def delete():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('DELETE FROM entries WHERE id = ?', (eid,))
+    cur.execute(
+        'INSERT OR REPLACE INTO deleted_entries (id, deleted_at) VALUES (?, ?)',
+        (eid, datetime.utcnow().isoformat())
+    )
     conn.commit()
     conn.close()
     git_sync(f"Deleted entry: {eid}")
