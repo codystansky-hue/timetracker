@@ -82,6 +82,12 @@ def init_db():
         cur.execute('ALTER TABLE invoices ADD COLUMN expense_total REAL DEFAULT 0.0')
     except sqlite3.OperationalError:
         pass
+    cur.execute('''
+    CREATE TABLE IF NOT EXISTS deleted_entries (
+        id INTEGER PRIMARY KEY,
+        deleted_at TEXT NOT NULL
+    )
+    ''')
     conn.commit()
     conn.close()
 
