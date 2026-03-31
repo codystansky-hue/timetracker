@@ -59,7 +59,9 @@ _sync_status = {
 def _merge_remote_entries(remote_db_path):
     """
     Merge entries from remote_db_path into the local DB.
-    - Inserts any remote entries missing locally (by ID).
+    - Propagates deleted_entries from remote → local (applies remote deletions locally).
+    - Propagates deleted_entries from local → remote DB file (so remote stops re-sending them).
+    - Inserts any remote entries missing locally (by ID), skipping locally-deleted IDs.
     - If same ID exists locally but different start_ts (ID collision between machines),
       inserts the remote entry as a new row with an auto-assigned ID.
     - Updates end_ts/duration_min locally if remote has it and local doesn't.
@@ -73,10 +75,48 @@ def _merge_remote_entries(remote_db_path):
     try:
         lc = local_conn.cursor()
         rc = remote_conn.cursor()
+
+        # Ensure deleted_entries table exists in both DBs
+        lc.execute('CREATE TABLE IF NOT EXISTS deleted_entries (id INTEGER PRIMARY KEY, deleted_at TEXT NOT NULL)')
+        rc.execute('CREATE TABLE IF NOT EXISTS deleted_entries (id INTEGER PRIMARY KEY, deleted_at TEXT NOT NULL)')
+
+        # Load local and remote deleted ID sets
+        lc.execute('SELECT id FROM deleted_entries')
+        local_deleted = {row[0] for row in lc.fetchall()}
+        rc.execute('SELECT id, deleted_at FROM deleted_entries')
+        remote_deleted_rows = rc.fetchall()
+        remote_deleted = {row[0]: row[1] for row in remote_deleted_rows}
+
+        # Propagate remote deletions → local
+        for rid, deleted_at in remote_deleted.items():
+            if rid not in local_deleted:
+                lc.execute('INSERT OR IGNORE INTO deleted_entries (id, deleted_at) VALUES (?, ?)', (rid, deleted_at))
+                lc.execute('DELETE FROM entries WHERE id = ?', (rid,))
+                app.logger.info(f"DB merge: applied remote deletion of entry {rid}")
+                changed = True
+
+        # Propagate local deletions → remote DB file so remote stops re-sending them
+        for lid in local_deleted:
+            lc.execute('SELECT deleted_at FROM deleted_entries WHERE id = ?', (lid,))
+            row = lc.fetchone()
+            if row:
+                rc.execute('INSERT OR IGNORE INTO deleted_entries (id, deleted_at) VALUES (?, ?)', (lid, row['deleted_at']))
+                rc.execute('DELETE FROM entries WHERE id = ?', (lid,))
+        remote_conn.commit()
+
+        # Rebuild full deleted set now that both sides are synced
+        local_deleted = local_deleted | set(remote_deleted.keys())
+
+        # Merge remote entries into local, skipping deleted IDs
         rc.execute('SELECT * FROM entries ORDER BY id')
         for re_row in rc.fetchall():
             re = dict(re_row)
             rid = re['id']
+
+            if rid in local_deleted:
+                app.logger.info(f"DB merge: skipping deleted entry {rid}")
+                continue
+
             lc.execute('SELECT * FROM entries WHERE id = ?', (rid,))
             le_row = lc.fetchone()
 
