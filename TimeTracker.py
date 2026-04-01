@@ -2513,6 +2513,13 @@ def service_worker():
     return send_file(str(APP_ROOT / 'static' / 'sw.js'), mimetype='application/javascript')
 
 
+@app.route('/api/shutdown', methods=['POST'])
+def shutdown():
+    import threading
+    threading.Timer(0.5, lambda: os._exit(0)).start()
+    return jsonify({'status': 'shutting down'})
+
+
 if __name__ == '__main__':
     print("Performing initial git sync...")
     git_sync("Startup sync")

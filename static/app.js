@@ -917,3 +917,11 @@ async function loadInvoices() {
     });
   });
 }
+
+// ── Shutdown ─────────────────────────────────────────────────────────────────
+
+document.getElementById('shutdownBtn').addEventListener('click', async () => {
+  if (!confirm('Stop the Time Tracker server?')) return;
+  await fetch('/api/shutdown', { method: 'POST' });
+  document.body.innerHTML = '<p style="font-family:sans-serif;padding:2rem">Server stopped. You can close this tab.</p>';
+});

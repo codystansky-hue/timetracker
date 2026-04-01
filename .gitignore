@@ -14,3 +14,4 @@ uploads/
 # Windows
 Time Tracker.lnk
 *.ps1
+!timetracker-start.ps1
