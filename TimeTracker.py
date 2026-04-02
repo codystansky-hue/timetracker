@@ -185,6 +185,13 @@ def git_sync(message="Sync database"):
         # Check if we are in a git repo
         subprocess.run(['git', 'rev-parse', '--is-inside-work-tree'], check=True, capture_output=True, cwd=APP_ROOT)
 
+        # Abort any stuck rebase left over from a previous failed sync
+        for rebase_dir in [APP_ROOT / '.git' / 'rebase-merge', APP_ROOT / '.git' / 'rebase-apply']:
+            if rebase_dir.exists():
+                app.logger.warning(f"Detected stuck rebase ({rebase_dir.name}), aborting before sync.")
+                subprocess.run(['git', 'rebase', '--abort'], capture_output=True, cwd=APP_ROOT)
+                break
+
         # Commit local changes first to avoid "cannot pull with unstaged changes"
         subprocess.run(['git', 'add', str(DB_PATH)], check=True, capture_output=True, cwd=APP_ROOT)
         status = subprocess.run(['git', 'status', '--porcelain', str(DB_PATH)], check=True, capture_output=True, text=True, cwd=APP_ROOT)
@@ -201,51 +208,59 @@ def git_sync(message="Sync database"):
             app.logger.warning("Git sync skipped pull/push: not on a branch (detached HEAD).")
             return
 
-        # Stash any other unstaged changes so rebase doesn't fail
+        # Stash any other unstaged changes so pull doesn't fail
         stash = subprocess.run(['git', 'stash'], capture_output=True, text=True, cwd=APP_ROOT)
         stashed = 'No local changes to save' not in stash.stdout
 
-        # Fetch remote, then merge its DB entries into local before pulling.
-        # This prevents entries logged on another machine from being silently
-        # dropped when git resolves the binary DB conflict.
-        subprocess.run(['git', 'fetch', 'origin'], check=True, capture_output=True, cwd=APP_ROOT)
-        remote_db_tmp = APP_ROOT / '.remote_db_tmp.db'
         try:
-            show = subprocess.run(
-                ['git', 'show', f'origin/{branch}:{DB_PATH.name}'],
-                capture_output=True, cwd=APP_ROOT
-            )
-            if show.returncode == 0 and show.stdout:
-                remote_db_tmp.write_bytes(show.stdout)
-                if _merge_remote_entries(remote_db_tmp):
-                    subprocess.run(['git', 'add', str(DB_PATH)], check=True, capture_output=True, cwd=APP_ROOT)
-                    merge_status = subprocess.run(
-                        ['git', 'status', '--porcelain', str(DB_PATH)],
-                        check=True, capture_output=True, text=True, cwd=APP_ROOT
-                    )
-                    if merge_status.stdout.strip():
-                        subprocess.run(
-                            ['git', 'commit', '-m', 'Merge remote entries'],
-                            check=True, capture_output=True, cwd=APP_ROOT
+            # Fetch remote, then merge its DB entries into local before pulling.
+            # This prevents entries logged on another machine from being silently
+            # dropped when git resolves the binary DB conflict.
+            subprocess.run(['git', 'fetch', 'origin'], check=True, capture_output=True, cwd=APP_ROOT)
+            remote_db_tmp = APP_ROOT / '.remote_db_tmp.db'
+            try:
+                show = subprocess.run(
+                    ['git', 'show', f'origin/{branch}:{DB_PATH.name}'],
+                    capture_output=True, cwd=APP_ROOT
+                )
+                if show.returncode == 0 and show.stdout:
+                    remote_db_tmp.write_bytes(show.stdout)
+                    if _merge_remote_entries(remote_db_tmp):
+                        subprocess.run(['git', 'add', str(DB_PATH)], check=True, capture_output=True, cwd=APP_ROOT)
+                        merge_status = subprocess.run(
+                            ['git', 'status', '--porcelain', str(DB_PATH)],
+                            check=True, capture_output=True, text=True, cwd=APP_ROOT
                         )
+                        if merge_status.stdout.strip():
+                            subprocess.run(
+                                ['git', 'commit', '-m', 'Merge remote entries'],
+                                check=True, capture_output=True, cwd=APP_ROOT
+                            )
+            finally:
+                if remote_db_tmp.exists():
+                    remote_db_tmp.unlink()
+
+            # Pull using merge strategy (not rebase) — much safer for binary files.
+            # Rebase replays local commits on top of remote, causing repeated binary
+            # conflicts that require an interactive editor to resolve on Windows.
+            # Since we've already merged remote DB entries locally, keep our version on conflict.
+            pull = subprocess.run(
+                ['git', 'pull', '--no-rebase', 'origin', branch],
+                capture_output=True, text=True, cwd=APP_ROOT
+            )
+            if pull.returncode != 0:
+                if 'CONFLICT' in pull.stdout or 'CONFLICT' in pull.stderr:
+                    # Our DB already includes all remote entries — keep it
+                    subprocess.run(['git', 'checkout', '--ours', str(DB_PATH)], check=True, cwd=APP_ROOT)
+                    subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
+                    subprocess.run(['git', 'commit', '-m', 'Resolve DB conflict (keep merged local)'],
+                                   check=True, cwd=APP_ROOT)
+                else:
+                    raise subprocess.CalledProcessError(pull.returncode, pull.args, pull.stdout, pull.stderr)
+
         finally:
-            if remote_db_tmp.exists():
-                remote_db_tmp.unlink()
-
-        # Pull latest changes; on binary DB conflict, keep our version (which now includes remote entries)
-        pull = subprocess.run(['git', 'pull', '--rebase', 'origin', branch],
-                              capture_output=True, text=True, cwd=APP_ROOT)
-        if pull.returncode != 0:
-            if 'CONFLICT' in pull.stdout or 'CONFLICT' in pull.stderr:
-                subprocess.run(['git', 'checkout', '--theirs', str(DB_PATH)], check=True, cwd=APP_ROOT)
-                subprocess.run(['git', 'add', str(DB_PATH)], check=True, cwd=APP_ROOT)
-                subprocess.run(['git', 'rebase', '--continue'], check=True,
-                               cwd=APP_ROOT, env={**os.environ, 'GIT_EDITOR': 'true'})
-            else:
-                raise subprocess.CalledProcessError(pull.returncode, pull.args, pull.stdout, pull.stderr)
-
-        if stashed:
-            subprocess.run(['git', 'stash', 'pop'], cwd=APP_ROOT)
+            if stashed:
+                subprocess.run(['git', 'stash', 'pop'], cwd=APP_ROOT)
 
         # Push to origin
         push = subprocess.run(['git', 'push', 'origin', branch], capture_output=True, text=True, cwd=APP_ROOT)
