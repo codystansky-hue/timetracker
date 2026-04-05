@@ -594,3 +594,40 @@ td.exp-cell select {
     color: #1a1b26;
     line-height: 1;
 }
+
+/* ── Invoice summary cards ──────────────────────────────────────────────── */
+
+.invoice-summary-cards { display: flex; gap: 12px; margin-bottom: 20px; }
+
+.summary-card {
+    flex: 1; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 14px 18px;
+}
+.summary-card.overdue  { border-color: var(--error);   background: rgba(247,118,142,0.07); }
+.summary-card.due-soon { border-color: var(--warning);  background: rgba(224,175,104,0.07); }
+.summary-card.unbilled { border-color: var(--accent);   background: rgba(122,162,247,0.07); }
+
+.summary-label {
+    font-size: 0.78rem; color: var(--text-muted);
+    text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;
+}
+.summary-value { font-size: 1.4rem; font-weight: 700; color: var(--fg); }
+
+.summary-card.overdue  .summary-value { color: var(--error); }
+.summary-card.due-soon .summary-value { color: var(--warning); }
+.summary-card.unbilled .summary-value { color: var(--accent); }
+
+.summary-breakdown { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
+.breakdown-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); }
+
+/* ── Invoice row states ─────────────────────────────────────────────────── */
+
+tr.row-overdue td { background: rgba(247,118,142,0.08); }
+tr.row-overdue .days-cell { color: var(--error); font-weight: 600; }
+
+tr.row-due-soon td { background: rgba(224,175,104,0.10); }
+tr.row-due-soon .days-cell { color: var(--warning); font-weight: 600; }
+
+tr.row-due-soon-mild .days-cell { color: var(--warning); }
+
+tr.row-paid td { opacity: 0.6; }
