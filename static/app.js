@@ -299,10 +299,22 @@ document.getElementById('invGenerateBtn').addEventListener('click', () => {
   if (start) params.set('start_date', start);
   if (end) params.set('end_date', end);
   if (!document.getElementById('invIncludeExpenses').checked) params.set('include_expenses', '0');
-  if (document.getElementById('invDraft').checked) params.set('draft', '1');
+  const isDraft = document.getElementById('invDraft').checked;
+  if (isDraft) params.set('draft', '1');
   const qs = params.toString() ? `?${params.toString()}` : '';
   window.open(`/generate_invoice/${invoiceClientId}${qs}`, '_blank');
   document.getElementById('invoiceModal').style.display = 'none';
+
+  // If not a draft, auto-navigate to Invoices tab and refresh list
+  if (!isDraft) {
+    document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.section').forEach(s => s.style.display = 'none');
+    const btn = document.querySelector('[data-section="invoices"]');
+    if (btn) btn.classList.add('active');
+    const sec = document.getElementById('section-invoices');
+    if (sec) sec.style.display = '';
+    setTimeout(() => loadInvoices(), 800);
+  }
 });
 
 document.getElementById('invCancelBtn').addEventListener('click', () => {
@@ -884,19 +896,53 @@ async function loadInvoices() {
   const tbody = document.querySelector('#invoicesTable tbody');
   if (!tbody) return;
   tbody.innerHTML = '';
+
+  const today = new Date(); today.setHours(0,0,0,0);
+  let outstanding = 0, overdue = 0, dueSoon = 0;
+
   data.forEach(inv => {
     const tr = document.createElement('tr');
     tr.dataset.id = inv.id;
     const isPaid = inv.status === 'paid';
     const total = parseFloat(inv.total_amount || 0) + parseFloat(inv.expense_total || 0);
+
+    // Due-date awareness
+    let daysLabel = '—';
+    if (inv.due_date) {
+      const due = new Date(inv.due_date); due.setHours(0,0,0,0);
+      const diff = Math.round((due - today) / 86400000);
+      if (!isPaid) {
+        if (diff < 0) {
+          daysLabel = `${Math.abs(diff)}d overdue`;
+          tr.classList.add('row-overdue');
+          overdue += total;
+        } else if (diff <= 7) {
+          daysLabel = `${diff}d`;
+          tr.classList.add('row-due-soon');
+          dueSoon += total;
+        } else if (diff <= 30) {
+          daysLabel = `${diff}d`;
+          tr.classList.add('row-due-soon-mild');
+          dueSoon += total;
+        } else {
+          daysLabel = `${diff}d`;
+        }
+      } else {
+        daysLabel = diff < 0 ? 'Paid (was overdue)' : 'Paid';
+        tr.classList.add('row-paid');
+      }
+    }
+    if (!isPaid) outstanding += total;
+
     tr.innerHTML = `
       <td>${inv.id}</td>
       <td>${inv.invoice_number}</td>
       <td>${inv.client_name || '—'}</td>
       <td>${inv.invoice_date}</td>
-      <td>${inv.due_date}</td>
+      <td>${inv.due_date || '—'}</td>
+      <td class="days-cell">${daysLabel}</td>
       <td>$${total.toFixed(2)}</td>
-      <td>${isPaid ? 'Paid' : 'Unpaid'}</td>
+      <td>${isPaid ? '<span class="status-badge billed">Paid</span>' : '<span class="status-badge">Unpaid</span>'}</td>
       <td>
         <label class="inline-check">
           <input type="checkbox" class="invoice-status-cb" data-id="${inv.id}" ${isPaid ? 'checked' : ''} />
@@ -907,6 +953,18 @@ async function loadInvoices() {
     `;
     tbody.appendChild(tr);
   });
+
+  // Update invoice summary cards
+  document.getElementById('summaryOutstanding').textContent = `$${outstanding.toFixed(2)}`;
+  document.getElementById('summaryOverdue').textContent = `$${overdue.toFixed(2)}`;
+  document.getElementById('summaryDueSoon').textContent = `$${dueSoon.toFixed(2)}`;
+
+  // Fetch and display unbilled time
+  const unbilled = await api('/api/invoices/unbilled-summary');
+  document.getElementById('summaryUnbilled').textContent = `$${unbilled.total.toFixed(2)}`;
+  document.getElementById('summaryUnbilledBreakdown').innerHTML = unbilled.clients.map(c =>
+    `<div class="breakdown-row"><span>${c.client}</span><span>$${c.amount.toFixed(2)}</span></div>`
+  ).join('');
 
   document.querySelectorAll('.invoice-status-cb').forEach(cb => {
     cb.addEventListener('change', async ev => {

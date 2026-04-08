@@ -194,6 +194,28 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h2 style="margin:0">Invoices</h2>
         </div>
+
+        <!-- Outstanding balance summary -->
+        <div id="invoiceSummary" class="invoice-summary-cards">
+          <div class="summary-card">
+            <div class="summary-label">Outstanding</div>
+            <div class="summary-value" id="summaryOutstanding">—</div>
+          </div>
+          <div class="summary-card overdue">
+            <div class="summary-label">Overdue</div>
+            <div class="summary-value" id="summaryOverdue">—</div>
+          </div>
+          <div class="summary-card due-soon">
+            <div class="summary-label">Due Within 30 Days</div>
+            <div class="summary-value" id="summaryDueSoon">—</div>
+          </div>
+          <div class="summary-card unbilled">
+            <div class="summary-label">Unbilled</div>
+            <div class="summary-value" id="summaryUnbilled">—</div>
+            <div class="summary-breakdown" id="summaryUnbilledBreakdown"></div>
+          </div>
+        </div>
+
         <table id="invoicesTable">
           <thead>
             <tr>
@@ -202,6 +224,7 @@
               <th>Client</th>
               <th>Date</th>
               <th>Due Date</th>
+              <th>Days Until Due</th>
               <th>Total</th>
               <th>Status</th>
               <th>Action</th>

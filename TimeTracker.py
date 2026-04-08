@@ -2474,6 +2474,27 @@ def get_invoices():
     conn.close()
     return jsonify(rows)
 
+@app.route('/api/invoices/unbilled-summary', methods=['GET'])
+def unbilled_summary():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT c.name as client_name, SUM(e.duration_min) as total_min, c.hourly_rate
+        FROM entries e
+        JOIN clients c ON e.client_id = c.id
+        WHERE e.invoice_id IS NULL AND e.end_ts IS NOT NULL
+        GROUP BY e.client_id
+    ''')
+    rows = []
+    grand_total = 0.0
+    for r in cur.fetchall():
+        hours = round(r['total_min'] / 60, 2)
+        amount = round(hours * r['hourly_rate'], 2)
+        grand_total += amount
+        rows.append({'client': r['client_name'], 'hours': hours, 'amount': amount})
+    conn.close()
+    return jsonify({'clients': rows, 'total': round(grand_total, 2)})
+
 @app.route('/api/invoices/<int:invoice_id>', methods=['PUT'])
 def update_invoice(invoice_id):
     data = request.json or {}
