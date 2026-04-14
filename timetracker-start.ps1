@@ -1,14 +1,8 @@
-# Self-elevate to Administrator if not already elevated
-if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$PSCommandPath`"" -Verb RunAs
-    exit
-}
-
 $repoRoot = $PSScriptRoot
 $pythonPath = "$repoRoot\venv\Scripts\python.exe"
 $scriptPath = "$repoRoot\TimeTracker.py"
 
-# Bootstrap venv if it doesn't exist
+# Bootstrap venv if it doesn't exist (e.g. fresh clone on a new machine)
 if (-not (Test-Path $pythonPath)) {
     Write-Host "Setting up virtual environment..."
     python -m venv "$repoRoot\venv"
