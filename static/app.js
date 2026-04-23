@@ -21,6 +21,17 @@ function fmtDuration(minutes) {
   return hrs % 1 === 0 ? hrs + 'h' : hrs.toFixed(2) + 'h';
 }
 
+function liveDurationMin(e) {
+  if (e.end_ts) return e.duration_min || 0;
+  const baseStr = e.resumed_at || e.start_ts;
+  if (!baseStr) return e.duration_min || 0;
+  const hastz = baseStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(baseStr);
+  const base = new Date(hastz ? baseStr : baseStr + 'Z');
+  const elapsed = Math.floor((Date.now() - base) / 60000);
+  const baseline = e.resumed_at ? (e.duration_min || 0) : 0;
+  return baseline + elapsed;
+}
+
 async function api(path, method = 'GET', body) {
   const opts = { method, headers: {} };
   if (body) {
@@ -64,6 +75,10 @@ function renderEntriesPage() {
     const tr = document.createElement('tr');
     tr.dataset.id = e.id;
     const isActive = !e.end_ts;
+    const resumedAt = e.resumed_at || '';
+    const baselineMin = resumedAt ? (e.duration_min || 0) : 0;
+    const timerAnchor = resumedAt || e.start_ts || '';
+    const canResume = !isActive && !e.invoice_id;
     tr.classList.toggle('active-row', isActive);
     tr.innerHTML = `
       <td>${e.id}</td>
@@ -72,9 +87,12 @@ function renderEntriesPage() {
       <td class="editable" data-field="description">${e.description || ''}</td>
       <td class="editable" data-field="start_ts" data-raw="${e.start_ts || ''}">${formatDate(e.start_ts)}</td>
       <td class="editable" data-field="end_ts" data-raw="${e.end_ts || ''}">${formatDate(e.end_ts)}</td>
-      <td class="duration-cell" data-start="${e.start_ts}">${fmtDuration(e.duration_min)}</td>
-      <td>${isActive ? '<span class="status-badge active">● Active</span>' : e.invoice_id ? '<span class="status-badge billed">Billed</span>' : '<span class="status-badge">Done</span>'}</td>
-      <td><button data-id="${e.id}" class="del">Delete</button></td>
+      <td class="duration-cell" data-start="${timerAnchor}" data-baseline="${baselineMin}">${fmtDuration(liveDurationMin(e))}</td>
+      <td>${isActive ? (resumedAt ? '<span class="status-badge active">● Resumed</span>' : '<span class="status-badge active">● Active</span>') : e.invoice_id ? '<span class="status-badge billed">Billed</span>' : '<span class="status-badge">Done</span>'}</td>
+      <td>
+        ${canResume ? `<button data-id="${e.id}" class="resume">Resume</button>` : ''}
+        <button data-id="${e.id}" class="del">Delete</button>
+      </td>
     `;
     tbody.appendChild(tr);
   });
@@ -85,6 +103,13 @@ function renderEntriesPage() {
       await api('/api/delete', 'POST', { id });
       loadAll();
     }
+  }));
+
+  document.querySelectorAll('.resume').forEach(b => b.addEventListener('click', async ev => {
+    const id = ev.target.dataset.id;
+    const res = await api('/api/resume', 'POST', { id });
+    if (res && res.error) { alert(res.error); return; }
+    loadAll();
   }));
 
   document.querySelectorAll('#entriesTable .editable').forEach(cell => {
@@ -154,30 +179,86 @@ function renderEntriesPage() {
   });
 }
 
+function isoDate(d) {
+  const tzOffset = d.getTimezoneOffset() * 60000;
+  return new Date(d.getTime() - tzOffset).toISOString().slice(0, 10);
+}
+
+// Compute [start, end] dates for a named preset. Weeks are Monday–Sunday.
+function presetRange(preset) {
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (preset === 'last_week') {
+    const dayOfWeek = (today.getDay() + 6) % 7; // Mon=0 … Sun=6
+    const thisMonday = new Date(today); thisMonday.setDate(today.getDate() - dayOfWeek);
+    const lastMonday = new Date(thisMonday); lastMonday.setDate(thisMonday.getDate() - 7);
+    const lastSunday = new Date(lastMonday); lastSunday.setDate(lastMonday.getDate() + 6);
+    return [isoDate(lastMonday), isoDate(lastSunday)];
+  }
+  if (preset === 'last_month') {
+    const first = new Date(today.getFullYear(), today.getMonth() - 1, 1);
+    const last = new Date(today.getFullYear(), today.getMonth(), 0);
+    return [isoDate(first), isoDate(last)];
+  }
+  return null;
+}
+
+function renderFilteredTotals() {
+  const filterClientId = document.getElementById('filterClient').value;
+  const filterStartDate = document.getElementById('filterStartDate').value;
+  const filterEndDate = document.getElementById('filterEndDate').value;
+  const filterStatus = document.getElementById('filterStatus').value;
+  const active = !!(filterClientId || filterStartDate || filterEndDate || (filterStatus && filterStatus !== 'all'));
+  const el = document.getElementById('filteredTotals');
+  if (!active) { el.style.display = 'none'; return; }
+
+  let totalMin = 0, totalValue = 0;
+  allEntries.forEach(e => {
+    if (!e.duration_min) return;
+    totalMin += e.duration_min;
+    const rate = clients.find(c => c.id == e.client_id)?.hourly_rate || 0;
+    totalValue += (e.duration_min / 60) * rate;
+  });
+  const hrs = Math.round(totalMin / 15) * 0.25;
+  document.getElementById('ftEntries').textContent = allEntries.length;
+  document.getElementById('ftHours').textContent = (hrs % 1 === 0 ? hrs + 'h' : hrs.toFixed(2) + 'h');
+  document.getElementById('ftValue').textContent = '$' + totalValue.toFixed(2);
+  el.style.display = '';
+}
+
 async function loadEntries() {
   const filterClientId = document.getElementById('filterClient').value;
   const filterStartDate = document.getElementById('filterStartDate').value;
   const filterEndDate = document.getElementById('filterEndDate').value;
   const filterStatus = document.getElementById('filterStatus').value;
-  
+
   let url = '/api/entries?';
   const params = new URLSearchParams();
   if (filterClientId) params.append('client_id', filterClientId);
   if (filterStartDate) params.append('start_date', filterStartDate);
   if (filterEndDate) params.append('end_date', filterEndDate);
   if (filterStatus && filterStatus !== 'all') params.append('status', filterStatus);
-  
+
   allEntries = await api(url + params.toString());
   currentPage = 1;
   renderEntriesPage();
+  renderFilteredTotals();
 }
 
 document.getElementById('applyFilterBtn').addEventListener('click', loadEntries);
 document.getElementById('clearFilterBtn').addEventListener('click', () => {
   document.getElementById('filterClient').value = '';
+  document.getElementById('filterPreset').value = '';
   document.getElementById('filterStartDate').value = '';
   document.getElementById('filterEndDate').value = '';
   document.getElementById('filterStatus').value = 'all';
+  loadEntries();
+});
+
+document.getElementById('filterPreset').addEventListener('change', ev => {
+  const range = presetRange(ev.target.value);
+  if (!range) return;
+  document.getElementById('filterStartDate').value = range[0];
+  document.getElementById('filterEndDate').value = range[1];
   loadEntries();
 });
 
@@ -881,10 +962,12 @@ if ('serviceWorker' in navigator) {
 setInterval(() => {
   document.querySelectorAll('.active-row .duration-cell').forEach(cell => {
     const startStr = cell.dataset.start;
+    if (!startStr) return;
+    const baseline = parseInt(cell.dataset.baseline) || 0;
     const hastz = startStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(startStr);
     const start = new Date(hastz ? startStr : startStr + 'Z');
     const now = new Date();
-    cell.textContent = fmtDuration(Math.floor((now - start) / 60000));
+    cell.textContent = fmtDuration(baseline + Math.floor((now - start) / 60000));
   });
 }, 30000);
 

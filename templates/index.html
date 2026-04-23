@@ -45,6 +45,11 @@
         <div class="controls filter-bar" style="margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px;">
           <strong>Filter Entries:</strong>
           <select id="filterClient"><option value="">All Clients</option></select>
+          <select id="filterPreset" title="Date range preset">
+            <option value="">Custom range…</option>
+            <option value="last_week">Last week</option>
+            <option value="last_month">Last month</option>
+          </select>
           <input type="date" id="filterStartDate" title="Start Date">
           <input type="date" id="filterEndDate" title="End Date">
           <select id="filterStatus">
@@ -54,6 +59,13 @@
           </select>
           <button id="applyFilterBtn">Apply Filter</button>
           <button id="clearFilterBtn">Clear Filter</button>
+        </div>
+
+        <div id="filteredTotals" class="filtered-totals" style="display:none">
+          <span class="ft-label">Filtered totals:</span>
+          <span class="ft-item"><strong id="ftEntries">0</strong> entries</span>
+          <span class="ft-item"><strong id="ftHours">0h</strong></span>
+          <span class="ft-item"><strong id="ftValue">$0.00</strong> billable</span>
         </div>
 
         <div class="section-header">

@@ -40,6 +40,11 @@ def init_db():
         cur.execute('ALTER TABLE entries ADD COLUMN invoice_id INTEGER REFERENCES invoices(id)')
     except sqlite3.OperationalError:
         pass  # Column already exists
+    # Add resumed_at column if it doesn't exist (tracks start of a resumed session)
+    try:
+        cur.execute('ALTER TABLE entries ADD COLUMN resumed_at TEXT')
+    except sqlite3.OperationalError:
+        pass  # Column already exists
     cur.execute('''
     CREATE TABLE IF NOT EXISTS projects (
         name TEXT PRIMARY KEY,

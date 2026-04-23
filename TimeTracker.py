@@ -309,6 +309,22 @@ def get_conn():
     conn.row_factory = sqlite3.Row
     return conn
 
+def _ensure_schema():
+    """Apply lightweight migrations for columns added after initial deploy."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cur = conn.cursor()
+        try:
+            cur.execute('ALTER TABLE entries ADD COLUMN resumed_at TEXT')
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass
+        conn.close()
+    except Exception as e:
+        app.logger.error(f'Schema migration failed: {e}')
+
+_ensure_schema()
+
 @app.route('/')
 def index():
     return render_template('index.html')
@@ -381,14 +397,51 @@ def stop():
     if not row:
         conn.close()
         return jsonify({'error': 'No running entry found'}), 404
-    start = datetime.fromisoformat(row['start_ts'])
     end_ts = now.isoformat()
-    duration_min = int((now - start).total_seconds() // 60)
-    cur.execute('UPDATE entries SET end_ts = ?, duration_min = ? WHERE id = ?', (end_ts, duration_min, row['id']))
+    resumed_at = row['resumed_at'] if 'resumed_at' in row.keys() else None
+    if resumed_at:
+        resumed_dt = datetime.fromisoformat(resumed_at)
+        added_min = int((now - resumed_dt).total_seconds() // 60)
+        duration_min = (row['duration_min'] or 0) + added_min
+    else:
+        start = datetime.fromisoformat(row['start_ts'])
+        duration_min = int((now - start).total_seconds() // 60)
+    cur.execute('UPDATE entries SET end_ts = ?, duration_min = ?, resumed_at = NULL WHERE id = ?', (end_ts, duration_min, row['id']))
     conn.commit()
     conn.close()
     git_sync(f"Stop entry: {row['id']}")
     return jsonify({'id': row['id'], 'end_ts': end_ts, 'duration_min': duration_min})
+
+@app.route('/api/resume', methods=['POST'])
+def resume():
+    data = request.json or {}
+    eid = data.get('id')
+    if not eid:
+        return jsonify({'error': 'id required'}), 400
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('SELECT * FROM entries WHERE id = ?', (eid,))
+    row = cur.fetchone()
+    if not row:
+        conn.close()
+        return jsonify({'error': 'Entry not found'}), 404
+    if row['end_ts'] is None:
+        conn.close()
+        return jsonify({'error': 'Entry is already running'}), 400
+    if row['invoice_id'] is not None:
+        conn.close()
+        return jsonify({'error': 'Cannot resume a billed entry'}), 400
+    cur.execute('SELECT id FROM entries WHERE end_ts IS NULL LIMIT 1')
+    active = cur.fetchone()
+    if active:
+        conn.close()
+        return jsonify({'error': f'Entry {active["id"]} is already running — stop it first'}), 400
+    now_iso = datetime.utcnow().isoformat()
+    cur.execute('UPDATE entries SET end_ts = NULL, resumed_at = ? WHERE id = ?', (now_iso, eid))
+    conn.commit()
+    conn.close()
+    git_sync(f"Resume entry: {eid}")
+    return jsonify({'id': row['id'], 'resumed_at': now_iso, 'baseline_min': row['duration_min'] or 0})
 
 @app.route('/api/add', methods=['POST'])
 def add_manual():
