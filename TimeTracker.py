@@ -160,13 +160,26 @@ def _merge_remote_entries(remote_db_path):
                         app.logger.info(f"DB merge: ID collision — inserted remote entry {rid} as new row")
                         changed = True
                 else:
-                    # Same entry — sync end_ts/duration_min if remote has it and local doesn't
-                    if re.get('end_ts') and not le.get('end_ts'):
+                    # Same entry — sync end_ts/duration_min if remote has it and local doesn't.
+                    # BUT: if local has `resumed_at` set, the NULL end_ts is intentional
+                    # (an in-progress resumed session) and must NOT be overwritten with the
+                    # remote's stale end_ts.
+                    le_resumed_at = le.get('resumed_at') if 'resumed_at' in le else None
+                    if re.get('end_ts') and not le.get('end_ts') and not le_resumed_at:
                         lc.execute(
                             'UPDATE entries SET end_ts = ?, duration_min = ? WHERE id = ?',
                             (re['end_ts'], re.get('duration_min'), rid)
                         )
                         app.logger.info(f"DB merge: updated end_ts for entry {rid} from remote")
+                        changed = True
+                    # Propagate remote `resumed_at` when local hasn't stopped the entry yet.
+                    re_resumed_at = re.get('resumed_at') if 'resumed_at' in re else None
+                    if re_resumed_at and not le_resumed_at and not le.get('end_ts'):
+                        lc.execute(
+                            'UPDATE entries SET resumed_at = ?, duration_min = ? WHERE id = ?',
+                            (re_resumed_at, re.get('duration_min'), rid)
+                        )
+                        app.logger.info(f"DB merge: propagated resumed_at for entry {rid} from remote")
                         changed = True
         if changed:
             local_conn.commit()
@@ -208,10 +221,12 @@ def git_sync(message="Sync database"):
             app.logger.warning("Git sync skipped pull/push: not on a branch (detached HEAD).")
             return
 
-        # Stash any other unstaged changes so pull doesn't fail
-        stash = subprocess.run(['git', 'stash'], capture_output=True, text=True, cwd=APP_ROOT)
-        stashed = 'No local changes to save' not in stash.stdout
-
+        # NOTE: we used to `git stash` here to protect the pull from local changes,
+        # but that would sweep up the user's in-progress source edits and sometimes
+        # lose them when `stash pop` failed or the Flask reloader killed the process
+        # mid-sync. The DB file is already committed above, so the pull below will
+        # only fail if uncommitted edits conflict with incoming changes — in which
+        # case we want to surface the error rather than silently stash user work.
         try:
             # Fetch remote, then merge its DB entries into local before pulling.
             # This prevents entries logged on another machine from being silently
@@ -259,8 +274,7 @@ def git_sync(message="Sync database"):
                     raise subprocess.CalledProcessError(pull.returncode, pull.args, pull.stdout, pull.stderr)
 
         finally:
-            if stashed:
-                subprocess.run(['git', 'stash', 'pop'], cwd=APP_ROOT)
+            pass
 
         # Push to origin
         push = subprocess.run(['git', 'push', 'origin', branch], capture_output=True, text=True, cwd=APP_ROOT)
