@@ -15,6 +15,12 @@ function formatDate(isoStr) {
   return isNaN(d) ? isoStr : d.toLocaleString();
 }
 
+function fmtShortDate(dateStr) {
+  if (!dateStr) return '';
+  const [y, m, d] = dateStr.split('-');
+  return `${parseInt(m)}/${parseInt(d)}/${y.slice(2)}`;
+}
+
 function fmtDuration(minutes) {
   if (!minutes) return '0h';
   const hrs = Math.round(minutes / 15) * 0.25;
@@ -1045,9 +1051,12 @@ async function loadInvoices() {
   // Fetch and display unbilled time
   const unbilled = await api('/api/invoices/unbilled-summary');
   document.getElementById('summaryUnbilled').textContent = `$${unbilled.total.toFixed(2)}`;
-  document.getElementById('summaryUnbilledBreakdown').innerHTML = unbilled.clients.map(c =>
-    `<div class="breakdown-row"><span>${c.client}</span><span>$${c.amount.toFixed(2)}</span></div>`
-  ).join('');
+  document.getElementById('summaryUnbilledBreakdown').innerHTML = unbilled.clients.map(c => {
+    const dateRange = (c.earliest && c.latest)
+      ? `<span class="breakdown-dates">${fmtShortDate(c.earliest)} – ${fmtShortDate(c.latest)}</span>`
+      : '';
+    return `<div class="breakdown-row"><span>${c.client}${dateRange}</span><span>$${c.amount.toFixed(2)}</span></div>`;
+  }).join('');
 
   document.querySelectorAll('.invoice-status-cb').forEach(cb => {
     cb.addEventListener('change', async ev => {

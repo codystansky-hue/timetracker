@@ -651,8 +651,10 @@ td.exp-cell select {
 .summary-card.due-soon .summary-value { color: var(--warning); }
 .summary-card.unbilled .summary-value { color: var(--accent); }
 
-.summary-breakdown { margin-top: 8px; display: flex; flex-direction: column; gap: 2px; }
-.breakdown-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); }
+.summary-breakdown { margin-top: 8px; display: flex; flex-direction: column; gap: 4px; }
+.breakdown-row { display: flex; justify-content: space-between; font-size: 0.75rem; color: var(--text-muted); align-items: flex-start; }
+.breakdown-row > span:first-child { display: flex; flex-direction: column; gap: 1px; }
+.breakdown-dates { font-size: 0.68rem; opacity: 0.65; }
 
 /* ── Invoice row states ─────────────────────────────────────────────────── */
 

@@ -2546,7 +2546,8 @@ def unbilled_summary():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute('''
-        SELECT c.name as client_name, SUM(e.duration_min) as total_min, c.hourly_rate
+        SELECT c.name as client_name, SUM(e.duration_min) as total_min, c.hourly_rate,
+               MIN(e.start_ts) as earliest, MAX(e.end_ts) as latest
         FROM entries e
         JOIN clients c ON e.client_id = c.id
         WHERE e.invoice_id IS NULL AND e.end_ts IS NOT NULL
@@ -2558,7 +2559,10 @@ def unbilled_summary():
         hours = round(r['total_min'] / 60, 2)
         amount = round(hours * r['hourly_rate'], 2)
         grand_total += amount
-        rows.append({'client': r['client_name'], 'hours': hours, 'amount': amount})
+        earliest = r['earliest'][:10] if r['earliest'] else None
+        latest = r['latest'][:10] if r['latest'] else None
+        rows.append({'client': r['client_name'], 'hours': hours, 'amount': amount,
+                     'earliest': earliest, 'latest': latest})
     conn.close()
     return jsonify({'clients': rows, 'total': round(grand_total, 2)})
 
