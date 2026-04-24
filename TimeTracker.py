@@ -388,6 +388,11 @@ def start():
     start_ts = datetime.utcnow().isoformat()
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute('SELECT id FROM entries WHERE end_ts IS NULL LIMIT 1')
+    active = cur.fetchone()
+    if active:
+        conn.close()
+        return jsonify({'error': f'Entry {active["id"]} is already running — stop it first'}), 400
     cur.execute('INSERT INTO entries (client_id, project, description, start_ts) VALUES (?, ?, ?, ?)', (client_id, project, description, start_ts))
     conn.commit()
     eid = cur.lastrowid
