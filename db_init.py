@@ -61,9 +61,14 @@ def init_db():
         total_hours REAL NOT NULL,
         total_amount REAL NOT NULL,
         status TEXT DEFAULT 'unpaid',
+        date_sent TEXT,
         FOREIGN KEY (client_id) REFERENCES clients (id)
     )
     ''')
+    try:
+        cur.execute('ALTER TABLE invoices ADD COLUMN date_sent TEXT')
+    except sqlite3.OperationalError:
+        pass
     cur.execute('''
     CREATE TABLE IF NOT EXISTS expenses (
         id           INTEGER PRIMARY KEY AUTOINCREMENT,

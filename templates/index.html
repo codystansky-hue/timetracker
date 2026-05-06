@@ -102,6 +102,7 @@
           <button class="tab-btn active" data-tab="manual">Manual Entry</button>
           <button class="tab-btn" data-tab="receipt">Receipt (OCR)</button>
           <button class="tab-btn" data-tab="email">Email Confirmation</button>
+          <button class="tab-btn" data-tab="claude">Claude Code (CSV)</button>
         </div>
 
         <div id="expenseControls">
@@ -134,6 +135,32 @@
             <div style="margin-top:8px">
               <button id="parseEmailBtn">Parse Email</button>
             </div>
+          </div>
+
+          <div class="tab-panel" id="tab-claude" style="display:none; flex-direction:column">
+            <p style="color:var(--text-muted);font-size:0.85rem;margin:0 0 8px">
+              Upload an Anthropic Console cost CSV. We&rsquo;ll group by API key and let you bill each one to a client.
+            </p>
+            <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+              <input type="file" id="claudeCsvFile" accept=".csv" />
+              <label style="font-size:0.85rem;color:var(--text-muted)">Start
+                <input type="date" id="claudeStartDate" />
+              </label>
+              <label style="font-size:0.85rem;color:var(--text-muted)">End
+                <input type="date" id="claudeEndDate" />
+              </label>
+              <button id="claudePreviewBtn">Preview</button>
+              <span id="claudeStatus" style="color:var(--text-muted);font-size:0.85rem"></span>
+            </div>
+            <table id="claudeGroupingsTable" style="display:none;margin-top:12px">
+              <thead>
+                <tr>
+                  <th>API Key</th><th>Days</th><th>Period</th><th>Cost</th>
+                  <th>Bill To</th><th>Action</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
           </div>
         </div>
 
@@ -235,6 +262,7 @@
               <th>Invoice #</th>
               <th>Client</th>
               <th>Date</th>
+              <th>Date Sent</th>
               <th>Due Date</th>
               <th>Days Until Due</th>
               <th>Total</th>
@@ -280,9 +308,14 @@
         <h3>Generate Invoice</h3>
         <p id="invoiceClientName" style="color:var(--text-muted);margin-top:0;margin-bottom:16px"></p>
         <div class="modal-fields">
-          <label>Start Date<input type="date" id="invStartDate" /></label>
-          <label>End Date<input type="date" id="invEndDate" /></label>
+          <label>Billing Period Start<input type="date" id="invStartDate" /></label>
+          <label>Billing Period End<input type="date" id="invEndDate" /></label>
+          <label>Date Sent<input type="date" id="invDateSent" /></label>
+          <label>Due Date<input type="date" id="invDueDate" /></label>
         </div>
+        <p style="color:var(--text-muted);font-size:0.8rem;margin:0 0 8px">
+          Due Date defaults to Date Sent + 30 days if left blank.
+        </p>
         <label class="modal-check" style="margin-bottom:8px">
           <input type="checkbox" id="invIncludeExpenses" checked /> Include reimbursable expenses
         </label>
