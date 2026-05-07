@@ -138,27 +138,57 @@ def _merge_remote_entries(remote_db_path):
             else:
                 le = dict(le_row)
                 if re.get('start_ts') != le.get('start_ts'):
-                    # Same ID, different entry — ID collision from two machines running independently.
-                    # Check if this remote entry already exists under a different local ID.
-                    lc.execute(
-                        'SELECT id FROM entries WHERE start_ts = ? AND client_id IS ? AND project = ?',
-                        (re['start_ts'], re.get('client_id'), re['project'])
-                    )
-                    if lc.fetchone() is None:
-                        re_new = {k: v for k, v in re.items() if k != 'id'}
-                        if re_new.get('end_ts') and not re_new.get('duration_min'):
-                            try:
-                                re_new['duration_min'] = int(
-                                    (datetime.fromisoformat(re_new['end_ts']) - datetime.fromisoformat(re_new['start_ts']))
-                                    .total_seconds() // 60
-                                )
-                            except (ValueError, TypeError):
-                                pass
-                        cols = ', '.join(re_new.keys())
-                        placeholders = ', '.join(['?'] * len(re_new))
-                        lc.execute(f'INSERT INTO entries ({cols}) VALUES ({placeholders})', list(re_new.values()))
-                        app.logger.info(f"DB merge: ID collision — inserted remote entry {rid} as new row")
-                        changed = True
+                    # Same ID, different start_ts. Two possibilities:
+                    #   (a) the local user edited this entry — we should keep local and skip insert
+                    #   (b) genuine ID collision: two offline machines auto-assigned the same ID
+                    # `updated_at` distinguishes them. If either side has it, the newer wins
+                    # and no duplicate row is inserted. Only when both sides predate the
+                    # `updated_at` migration (legacy rows) do we fall back to the original
+                    # collision-insert behavior.
+                    le_updated = le.get('updated_at') if 'updated_at' in le else None
+                    re_updated = re.get('updated_at') if 'updated_at' in re else None
+                    if le_updated or re_updated:
+                        if (re_updated or '') > (le_updated or ''):
+                            # Remote edit is newer — apply remote's mutable fields to local row
+                            re_dur = re.get('duration_min')
+                            if re.get('end_ts') and not re_dur:
+                                try:
+                                    re_dur = int(
+                                        (datetime.fromisoformat(re['end_ts']) - datetime.fromisoformat(re['start_ts']))
+                                        .total_seconds() // 60
+                                    )
+                                except (ValueError, TypeError):
+                                    pass
+                            lc.execute(
+                                'UPDATE entries SET client_id = ?, project = ?, description = ?, '
+                                'start_ts = ?, end_ts = ?, duration_min = ?, updated_at = ? WHERE id = ?',
+                                (re.get('client_id'), re.get('project'), re.get('description'),
+                                 re.get('start_ts'), re.get('end_ts'), re_dur, re_updated, rid)
+                            )
+                            app.logger.info(f"DB merge: applied remote edit to entry {rid}")
+                            changed = True
+                        # else: local edit is newer (or equal) — keep local, no insert
+                    else:
+                        # Legacy rows on both sides: preserve original cross-machine recovery
+                        lc.execute(
+                            'SELECT id FROM entries WHERE start_ts = ? AND client_id IS ? AND project = ?',
+                            (re['start_ts'], re.get('client_id'), re['project'])
+                        )
+                        if lc.fetchone() is None:
+                            re_new = {k: v for k, v in re.items() if k != 'id'}
+                            if re_new.get('end_ts') and not re_new.get('duration_min'):
+                                try:
+                                    re_new['duration_min'] = int(
+                                        (datetime.fromisoformat(re_new['end_ts']) - datetime.fromisoformat(re_new['start_ts']))
+                                        .total_seconds() // 60
+                                    )
+                                except (ValueError, TypeError):
+                                    pass
+                            cols = ', '.join(re_new.keys())
+                            placeholders = ', '.join(['?'] * len(re_new))
+                            lc.execute(f'INSERT INTO entries ({cols}) VALUES ({placeholders})', list(re_new.values()))
+                            app.logger.info(f"DB merge: ID collision — inserted remote entry {rid} as new row")
+                            changed = True
                 else:
                     # Same entry — sync end_ts/duration_min if remote has it and local doesn't.
                     # BUT: if local has `resumed_at` set, the NULL end_ts is intentional
@@ -328,11 +358,15 @@ def _ensure_schema():
     try:
         conn = sqlite3.connect(DB_PATH)
         cur = conn.cursor()
-        try:
-            cur.execute('ALTER TABLE entries ADD COLUMN resumed_at TEXT')
-            conn.commit()
-        except sqlite3.OperationalError:
-            pass
+        for ddl in (
+            'ALTER TABLE entries ADD COLUMN resumed_at TEXT',
+            'ALTER TABLE entries ADD COLUMN updated_at TEXT',
+        ):
+            try:
+                cur.execute(ddl)
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
         conn.close()
     except Exception as e:
         app.logger.error(f'Schema migration failed: {e}')
@@ -393,7 +427,10 @@ def start():
     if active:
         conn.close()
         return jsonify({'error': f'Entry {active["id"]} is already running — stop it first'}), 400
-    cur.execute('INSERT INTO entries (client_id, project, description, start_ts) VALUES (?, ?, ?, ?)', (client_id, project, description, start_ts))
+    cur.execute(
+        'INSERT INTO entries (client_id, project, description, start_ts, updated_at) VALUES (?, ?, ?, ?, ?)',
+        (client_id, project, description, start_ts, start_ts)
+    )
     conn.commit()
     eid = cur.lastrowid
     conn.close()
@@ -425,7 +462,10 @@ def stop():
     else:
         start = datetime.fromisoformat(row['start_ts'])
         duration_min = int((now - start).total_seconds() // 60)
-    cur.execute('UPDATE entries SET end_ts = ?, duration_min = ?, resumed_at = NULL WHERE id = ?', (end_ts, duration_min, row['id']))
+    cur.execute(
+        'UPDATE entries SET end_ts = ?, duration_min = ?, resumed_at = NULL, updated_at = ? WHERE id = ?',
+        (end_ts, duration_min, end_ts, row['id'])
+    )
     conn.commit()
     conn.close()
     git_sync(f"Stop entry: {row['id']}")
@@ -456,7 +496,10 @@ def resume():
         conn.close()
         return jsonify({'error': f'Entry {active["id"]} is already running — stop it first'}), 400
     now_iso = datetime.utcnow().isoformat()
-    cur.execute('UPDATE entries SET end_ts = NULL, resumed_at = ? WHERE id = ?', (now_iso, eid))
+    cur.execute(
+        'UPDATE entries SET end_ts = NULL, resumed_at = ?, updated_at = ? WHERE id = ?',
+        (now_iso, now_iso, eid)
+    )
     conn.commit()
     conn.close()
     git_sync(f"Resume entry: {eid}")
@@ -477,7 +520,11 @@ def add_manual():
     duration_min = int((end - start).total_seconds() // 60)
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('INSERT INTO entries (client_id, project, description, start_ts, end_ts, duration_min) VALUES (?, ?, ?, ?, ?, ?)', (client_id, project, description, start_ts, end_ts, duration_min))
+    now_iso = datetime.utcnow().isoformat()
+    cur.execute(
+        'INSERT INTO entries (client_id, project, description, start_ts, end_ts, duration_min, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (client_id, project, description, start_ts, end_ts, duration_min, now_iso)
+    )
     conn.commit()
     eid = cur.lastrowid
     conn.close()
@@ -558,9 +605,10 @@ def edit():
         else:
             duration_min = None
 
+    now_iso = datetime.utcnow().isoformat()
     cur.execute(
-        'UPDATE entries SET client_id = ?, project = ?, description = ?, start_ts = ?, end_ts = ?, duration_min = ? WHERE id = ?',
-        (client_id, project, description, start_ts_str, end_ts_str, duration_min, eid)
+        'UPDATE entries SET client_id = ?, project = ?, description = ?, start_ts = ?, end_ts = ?, duration_min = ?, updated_at = ? WHERE id = ?',
+        (client_id, project, description, start_ts_str, end_ts_str, duration_min, now_iso, eid)
     )
     conn.commit()
     conn.close()
