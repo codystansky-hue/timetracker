@@ -11,6 +11,11 @@ invoices/
 *.pdf
 uploads/
 
+# Runtime artifacts
+*.log
+pid.txt
+.playwright-mcp/
+
 # Windows
 Time Tracker.lnk
 *.ps1

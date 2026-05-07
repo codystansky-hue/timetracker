@@ -367,6 +367,21 @@ def _ensure_schema():
                 conn.commit()
             except sqlite3.OperationalError:
                 pass
+        # invoices.date_sent — separate "date the invoice was actually sent
+        # to the client" from invoice_date (the billed-on / generated date).
+        # Backfill existing rows with invoice_date so finance-dash and any
+        # downstream consumers see a populated value.
+        try:
+            cur.execute('ALTER TABLE invoices ADD COLUMN date_sent TEXT')
+            cur.execute('UPDATE invoices SET date_sent = invoice_date WHERE date_sent IS NULL')
+            conn.commit()
+        except sqlite3.OperationalError:
+            # Column already exists; still backfill any NULLs that snuck in.
+            try:
+                cur.execute('UPDATE invoices SET date_sent = invoice_date WHERE date_sent IS NULL')
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass
         conn.close()
     except Exception as e:
         app.logger.error(f'Schema migration failed: {e}')
@@ -2244,12 +2259,145 @@ def parse_email():
     return jsonify({'parsed': parsed})
 
 
+@app.route('/api/expenses/import-claude-csv', methods=['POST'])
+def import_claude_csv():
+    """Import an Anthropic Claude API cost CSV as a rolled-up expense.
+
+    Expected CSV columns (Anthropic console export):
+        usage_date_utc, model, workspace, api_key, usage_type, context_window,
+        token_type, cost_usd, list_price_usd, cost_type, inference_geo, speed
+
+    Multipart form fields:
+        file          — the CSV (required)
+        dry_run       — '1' to preview groupings (no DB write)
+        api_key       — api_key value to filter by (required unless dry_run)
+        client_id     — client to bill (required unless dry_run)
+        start_date    — ISO date filter (optional)
+        end_date      — ISO date filter (optional)
+        expense_date  — date for the resulting expense (default: end_date or max date)
+        description   — override description (default: auto)
+        project       — project tag (optional)
+        reimbursable  — '0' to opt out (default reimbursable)
+    """
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+    f = request.files['file']
+    if not (f.filename or '').lower().endswith('.csv'):
+        return jsonify({'error': 'File must be a CSV'}), 400
+    try:
+        text = f.read().decode('utf-8-sig')
+    except UnicodeDecodeError:
+        return jsonify({'error': 'CSV must be UTF-8 encoded'}), 400
+
+    reader = csv.DictReader(io.StringIO(text))
+    required = {'usage_date_utc', 'api_key', 'cost_usd'}
+    cols = set(reader.fieldnames or [])
+    if not required.issubset(cols):
+        return jsonify({
+            'error': 'CSV missing required columns',
+            'expected': sorted(required),
+            'got': reader.fieldnames,
+        }), 400
+
+    start_date = (request.form.get('start_date') or '').strip() or None
+    end_date = (request.form.get('end_date') or '').strip() or None
+
+    by_key = defaultdict(lambda: {'cost': 0.0, 'rows': 0, 'min_date': None, 'max_date': None})
+    for row in reader:
+        date = (row.get('usage_date_utc') or '').strip()
+        if not date:
+            continue
+        if start_date and date < start_date:
+            continue
+        if end_date and date > end_date:
+            continue
+        key = (row.get('api_key') or '').strip()
+        try:
+            cost = float(row.get('cost_usd') or 0)
+        except ValueError:
+            continue
+        g = by_key[key]
+        g['cost'] += cost
+        g['rows'] += 1
+        if g['min_date'] is None or date < g['min_date']:
+            g['min_date'] = date
+        if g['max_date'] is None or date > g['max_date']:
+            g['max_date'] = date
+
+    groupings = [
+        {
+            'api_key': k,
+            'total_cost': round(v['cost'], 2),
+            'rows': v['rows'],
+            'min_date': v['min_date'],
+            'max_date': v['max_date'],
+        }
+        for k, v in sorted(by_key.items(), key=lambda x: -x[1]['cost'])
+    ]
+
+    if request.form.get('dry_run') == '1':
+        return jsonify({
+            'groupings': groupings,
+            'start_date': start_date,
+            'end_date': end_date,
+        })
+
+    api_key_filter = (request.form.get('api_key') or '').strip()
+    client_id = request.form.get('client_id')
+    if not api_key_filter:
+        return jsonify({'error': 'api_key required (use dry_run=1 to preview)'}), 400
+    if not client_id:
+        return jsonify({'error': 'client_id required'}), 400
+
+    matched = next((g for g in groupings if g['api_key'] == api_key_filter), None)
+    if not matched or matched['total_cost'] <= 0:
+        return jsonify({'error': f'No usage found for api_key "{api_key_filter}" in range'}), 404
+
+    amount = round(matched['total_cost'], 2)
+    expense_date = (request.form.get('expense_date') or '').strip() or end_date or matched['max_date']
+
+    desc = (request.form.get('description') or '').strip()
+    if not desc:
+        period = f"{matched['min_date']} to {matched['max_date']}"
+        desc = f"Claude Code API usage ({api_key_filter}) {period}"
+
+    project = request.form.get('project', '')
+    reimbursable = 0 if request.form.get('reimbursable') == '0' else 1
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        INSERT INTO expenses
+            (client_id, project, vendor, amount, expense_date, category,
+             description, reimbursable, source, receipt_path, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        int(client_id), project, 'Anthropic - Claude Code',
+        amount, expense_date, 'software',
+        desc, reimbursable, 'anthropic_csv', '',
+        datetime.utcnow().isoformat(),
+    ))
+    conn.commit()
+    eid = cur.lastrowid
+    conn.close()
+    git_sync(f"Imported Claude Code cost: ${amount:.2f} ({api_key_filter})")
+    return jsonify({
+        'id': eid,
+        'amount': amount,
+        'expense_date': expense_date,
+        'description': desc,
+        'period': {'start': matched['min_date'], 'end': matched['max_date']},
+    })
+
+
 @app.route('/generate_invoice/<int:client_id>')
 def generate_invoice(client_id):
     draft = request.args.get('draft', '0') == '1'
     include_expenses = request.args.get('include_expenses', '1') == '1'
     start_date = request.args.get('start_date')  # YYYY-MM-DD, optional
     end_date = request.args.get('end_date')        # YYYY-MM-DD, optional
+    date_sent_arg = request.args.get('date_sent')  # YYYY-MM-DD, optional
+    due_date_arg = request.args.get('due_date')    # YYYY-MM-DD, optional
     conn = get_conn()
     cur = conn.cursor()
     # Get client
@@ -2329,19 +2477,31 @@ def generate_invoice(client_id):
     max_num = max(max_file, max_db)
     invoice_number = f"{config.INVOICE_PREFIX}{max_num + 1:03d}"
 
-    # Invoice date and due date
+    # Invoice date, date sent, and due date
+    # invoice_date  = the date the invoice was generated/billed-on (kept for
+    #                 backwards compatibility with finance-dash and PDF rendering)
+    # date_sent     = the date the invoice was actually sent to the client
+    #                 (defaults to today; user-overridable)
+    # due_date      = derived as date_sent + 30 days unless the user supplies one
     invoice_date = datetime.now().date()
-    due_date = invoice_date + timedelta(days=30)
+    try:
+        date_sent = datetime.fromisoformat(date_sent_arg).date() if date_sent_arg else invoice_date
+    except ValueError:
+        date_sent = invoice_date
+    try:
+        due_date = datetime.fromisoformat(due_date_arg).date() if due_date_arg else date_sent + timedelta(days=30)
+    except ValueError:
+        due_date = date_sent + timedelta(days=30)
 
     # Insert invoice into DB only if not draft
     invoice_id = None
     if not draft:
         cur.execute('''
             INSERT INTO invoices
-                (invoice_number, client_id, invoice_date, due_date, total_hours, total_amount, expense_total)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+                (invoice_number, client_id, invoice_date, due_date, total_hours, total_amount, expense_total, date_sent)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (invoice_number, client_id, invoice_date.isoformat(), due_date.isoformat(),
-              total_hours, total_amount, expense_total))
+              total_hours, total_amount, expense_total, date_sent.isoformat()))
         conn.commit()
         invoice_id = cur.lastrowid
         
@@ -2373,7 +2533,33 @@ def generate_invoice(client_id):
     prefix = 'DRAFT-' if draft else ''
     pdf_path = invoices_dir / f'{prefix}{invoice_number}.pdf'
 
-    # Generate PDF
+    _build_invoice_pdf(
+        pdf_path=pdf_path,
+        client=client,
+        entries=entries,
+        reimbursable_expenses=reimbursable_expenses,
+        invoice_number=invoice_number,
+        invoice_date=invoice_date,
+        due_date=due_date,
+        display_start=display_start,
+        display_end=display_end,
+        total_hours=total_hours,
+        total_amount=total_amount,
+        hourly_rate=hourly_rate,
+        expense_total=expense_total,
+        grand_total=grand_total,
+        date_range=date_range,
+    )
+
+    return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{prefix}{invoice_number}.pdf')
+
+
+def _build_invoice_pdf(*, pdf_path, client, entries, reimbursable_expenses,
+                       invoice_number, invoice_date, due_date,
+                       display_start, display_end,
+                       total_hours, total_amount, hourly_rate,
+                       expense_total, grand_total, date_range):
+    """Render an invoice PDF to pdf_path. All data must be pre-fetched."""
     doc = SimpleDocTemplate(str(pdf_path), pagesize=letter, rightMargin=72, leftMargin=72, topMargin=72, bottomMargin=18)
     styles = getSampleStyleSheet()
     styles.add(ParagraphStyle(name='RightAlign', alignment=TA_RIGHT))
@@ -2431,21 +2617,28 @@ def generate_invoice(client_id):
         story.append(Spacer(1, 12))
 
         time_label = 'Subtotal (Hours):' if reimbursable_expenses else 'Total:'
-        tdata = [['Date', 'Description', 'Hours', 'Subtotal']]
+        tdata = [['Date', 'Project', 'Description', 'Hours', 'Subtotal']]
         for e in entries:
             d = datetime.fromisoformat(e['start_ts']).date()
-            desc = e['description'] or e['project'] or ''
+            proj = e['project'] or ''
+            desc = e['description'] or ''
             hrs = round(e['duration_min'] / 60, 2)
             subtotal = round(hrs * hourly_rate, 2)
-            tdata.append([str(d), Paragraph(desc, styles['Normal']), f"{hrs}", f"${subtotal:.2f}"])
-        tdata.append(['', time_label, str(total_hours), f"${total_amount:.2f}"])
+            tdata.append([
+                str(d),
+                Paragraph(proj, styles['Normal']),
+                Paragraph(desc, styles['Normal']),
+                f"{hrs}",
+                f"${subtotal:.2f}",
+            ])
+        tdata.append(['', '', time_label, str(total_hours), f"${total_amount:.2f}"])
 
-        time_table = Table(tdata, colWidths=[80, 250, 60, 80])
+        time_table = Table(tdata, colWidths=[60, 100, 175, 50, 75])
         time_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.lightgrey),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.black),
             ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
-            ('ALIGN', (2, 0), (-1, -1), 'RIGHT'),
+            ('ALIGN', (3, 0), (-1, -1), 'RIGHT'),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.black),
@@ -2516,7 +2709,7 @@ def generate_invoice(client_id):
         story.append(Paragraph(f"PayPal: {config.PAYPAL_EMAIL}", styles['Normal']))
 
     # Receipt appendix — one page break, then receipts 2-up
-    receipts_to_append = [e for e in reimbursable_expenses if e.get('receipt_path')]
+    receipts_to_append = [e for e in reimbursable_expenses if e['receipt_path']]
     if receipts_to_append:
         story.append(PageBreak())
         story.append(Paragraph("Exhibit A – Receipt Documentation", styles['Heading2']))
@@ -2559,7 +2752,92 @@ def generate_invoice(client_id):
 
     doc.build(story)
 
-    return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{prefix}{invoice_number}.pdf')
+
+@app.route('/regenerate_invoice/<int:invoice_id>')
+def regenerate_invoice(invoice_id):
+    """Rebuild the PDF for an existing invoice without changing its number.
+
+    Optional query params:
+        due_date    — ISO date, updates the invoice row before rendering
+        date_sent   — ISO date, updates the invoice row before rendering
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Optional metadata updates first
+    updates, params = [], []
+    for field in ('due_date', 'date_sent'):
+        v = request.args.get(field)
+        if v:
+            updates.append(f'{field} = ?')
+            params.append(v)
+    if updates:
+        params.append(invoice_id)
+        cur.execute(f'UPDATE invoices SET {", ".join(updates)} WHERE id = ?', params)
+        conn.commit()
+
+    cur.execute('SELECT * FROM invoices WHERE id = ?', (invoice_id,))
+    inv = cur.fetchone()
+    if not inv:
+        conn.close()
+        return jsonify({'error': 'Invoice not found'}), 404
+    cur.execute('SELECT * FROM clients WHERE id = ?', (inv['client_id'],))
+    client = cur.fetchone()
+    if not client:
+        conn.close()
+        return jsonify({'error': 'Client not found'}), 404
+
+    cur.execute('SELECT * FROM entries WHERE invoice_id = ? ORDER BY start_ts', (invoice_id,))
+    entries = cur.fetchall()
+    cur.execute(
+        'SELECT * FROM expenses WHERE invoice_id = ? AND reimbursable = 1 ORDER BY expense_date',
+        (invoice_id,),
+    )
+    reimbursable_expenses = cur.fetchall()
+    conn.close()
+
+    hourly_rate = client['hourly_rate'] or config.HOURLY_RATE
+    total_min = sum(e['duration_min'] for e in entries) if entries else 0
+    total_hours = round(total_min / 60, 2)
+    total_amount = round(total_hours * hourly_rate, 2)
+    expense_total = round(sum(e['amount'] for e in reimbursable_expenses), 2)
+    grand_total = round(total_amount + expense_total, 2)
+
+    if entries:
+        entry_dates = [datetime.fromisoformat(e['start_ts']).date() for e in entries]
+        display_start, display_end = min(entry_dates), max(entry_dates)
+    elif reimbursable_expenses:
+        exp_dates = [datetime.strptime(e['expense_date'], '%Y-%m-%d').date() for e in reimbursable_expenses]
+        display_start, display_end = min(exp_dates), max(exp_dates)
+    else:
+        display_start = display_end = datetime.fromisoformat(inv['invoice_date']).date()
+    date_range = f"{display_start} to {display_end}"
+
+    invoice_number = inv['invoice_number']
+    invoice_date = datetime.fromisoformat(inv['invoice_date']).date()
+    due_date = datetime.fromisoformat(inv['due_date']).date()
+
+    pdf_path = Path('invoices') / f'{invoice_number}.pdf'
+    _build_invoice_pdf(
+        pdf_path=pdf_path,
+        client=client,
+        entries=entries,
+        reimbursable_expenses=reimbursable_expenses,
+        invoice_number=invoice_number,
+        invoice_date=invoice_date,
+        due_date=due_date,
+        display_start=display_start,
+        display_end=display_end,
+        total_hours=total_hours,
+        total_amount=total_amount,
+        hourly_rate=hourly_rate,
+        expense_total=expense_total,
+        grand_total=grand_total,
+        date_range=date_range,
+    )
+    git_sync(f"Regenerated invoice: {invoice_number}")
+    return send_file(str(pdf_path), mimetype='application/pdf', as_attachment=True, download_name=f'{invoice_number}.pdf')
+
 
 @app.route('/api/expenses/<int:expense_id>/receipt', methods=['POST'])
 def attach_receipt(expense_id):
@@ -2622,16 +2900,33 @@ def unbilled_summary():
 @app.route('/api/invoices/<int:invoice_id>', methods=['PUT'])
 def update_invoice(invoice_id):
     data = request.json or {}
-    status = data.get('status')
-    if not status:
-        return jsonify({'error': 'status required'}), 400
+    # Allow editing status, date_sent, and due_date. At least one required.
+    fields = {}
+    if 'status' in data and data['status']:
+        fields['status'] = data['status']
+    if 'date_sent' in data:
+        fields['date_sent'] = data['date_sent'] or None
+    if 'due_date' in data and data['due_date']:
+        fields['due_date'] = data['due_date']
+    # If the caller updated date_sent without also setting due_date, recompute
+    # due_date = date_sent + 30 days so the two stay aligned.
+    if 'date_sent' in fields and 'due_date' not in fields and fields['date_sent']:
+        try:
+            ds = datetime.fromisoformat(fields['date_sent']).date()
+            fields['due_date'] = (ds + timedelta(days=30)).isoformat()
+        except ValueError:
+            pass  # malformed date_sent — leave due_date as-is
+    if not fields:
+        return jsonify({'error': 'no updatable fields supplied'}), 400
+    set_clause = ', '.join(f'{k} = ?' for k in fields)
+    params = list(fields.values()) + [invoice_id]
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute('UPDATE invoices SET status = ? WHERE id = ?', (status, invoice_id))
+    cur.execute(f'UPDATE invoices SET {set_clause} WHERE id = ?', params)
     conn.commit()
     conn.close()
-    git_sync(f"Updated invoice status: {invoice_id} to {status}")
-    return jsonify({'updated': invoice_id, 'status': status})
+    git_sync(f"Updated invoice {invoice_id}: {fields}")
+    return jsonify({'updated': invoice_id, **fields})
 
 @app.route('/api/invoices/<int:invoice_id>/download', methods=['GET'])
 def download_invoice(invoice_id):

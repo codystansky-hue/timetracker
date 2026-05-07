@@ -348,6 +348,11 @@ async function loadClients() {
     document.getElementById('invoiceClientName').textContent = ev.target.dataset.name;
     document.getElementById('invStartDate').value = '';
     document.getElementById('invEndDate').value = '';
+    // Default Date Sent to today; leave Due Date blank so the server fills
+    // it with date_sent + 30 days.
+    const todayIso = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in local TZ
+    document.getElementById('invDateSent').value = todayIso;
+    document.getElementById('invDueDate').value = '';
     document.getElementById('invDraft').checked = false;
     document.getElementById('invIncludeExpenses').checked = true;
     document.getElementById('invoiceModal').style.display = 'flex';
@@ -383,8 +388,12 @@ document.getElementById('invGenerateBtn').addEventListener('click', () => {
   const params = new URLSearchParams();
   const start = document.getElementById('invStartDate').value;
   const end = document.getElementById('invEndDate').value;
+  const dateSent = document.getElementById('invDateSent').value;
+  const dueDate = document.getElementById('invDueDate').value;
   if (start) params.set('start_date', start);
   if (end) params.set('end_date', end);
+  if (dateSent) params.set('date_sent', dateSent);
+  if (dueDate) params.set('due_date', dueDate);
   if (!document.getElementById('invIncludeExpenses').checked) params.set('include_expenses', '0');
   const isDraft = document.getElementById('invDraft').checked;
   if (isDraft) params.set('draft', '1');
@@ -763,6 +772,74 @@ function openNextFromQueue() {
   openExpenseModal(item.parsed, 'receipt', item.receipt_path, item.raw_text, receiptQueue.length);
 }
 
+// Claude Code CSV import
+document.getElementById('claudePreviewBtn').addEventListener('click', async () => {
+  const fileEl = document.getElementById('claudeCsvFile');
+  const status = document.getElementById('claudeStatus');
+  const tbl = document.getElementById('claudeGroupingsTable');
+  if (!fileEl.files || !fileEl.files[0]) {
+    return alert('Choose a CSV file first');
+  }
+  const fd = new FormData();
+  fd.append('file', fileEl.files[0]);
+  fd.append('dry_run', '1');
+  const start = document.getElementById('claudeStartDate').value;
+  const end = document.getElementById('claudeEndDate').value;
+  if (start) fd.append('start_date', start);
+  if (end) fd.append('end_date', end);
+  status.textContent = 'Parsing…';
+  const resp = await fetch('/api/expenses/import-claude-csv', { method: 'POST', body: fd });
+  const data = await resp.json();
+  if (!resp.ok) {
+    status.textContent = '';
+    return alert(`Error: ${data.error || 'Failed to parse CSV'}`);
+  }
+  status.textContent = `${data.groupings.length} API key(s) found.`;
+  const tbody = tbl.querySelector('tbody');
+  tbody.innerHTML = '';
+  data.groupings.forEach(g => {
+    if (g.total_cost <= 0) return;
+    const tr = document.createElement('tr');
+    const days = g.min_date === g.max_date ? '1' :
+      String(Math.round((Date.parse(g.max_date) - Date.parse(g.min_date)) / 86400000) + 1);
+    tr.innerHTML = `
+      <td><code>${g.api_key || '(blank)'}</code></td>
+      <td>${days}</td>
+      <td>${g.min_date} → ${g.max_date}</td>
+      <td style="text-align:right">$${g.total_cost.toFixed(2)}</td>
+      <td><select class="claudeBillToClient"><option value="">No Client</option></select></td>
+      <td><button class="claudeImportBtn">Import</button></td>
+    `;
+    const sel = tr.querySelector('.claudeBillToClient');
+    clients.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (norm(c.name) === norm(g.api_key)) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    tr.querySelector('.claudeImportBtn').addEventListener('click', async () => {
+      const clientId = sel.value;
+      if (!clientId) return alert('Choose a client to bill');
+      const fd2 = new FormData();
+      fd2.append('file', fileEl.files[0]);
+      fd2.append('api_key', g.api_key);
+      fd2.append('client_id', clientId);
+      if (start) fd2.append('start_date', start);
+      if (end) fd2.append('end_date', end);
+      if (end) fd2.append('expense_date', end);
+      const r = await fetch('/api/expenses/import-claude-csv', { method: 'POST', body: fd2 });
+      const d = await r.json();
+      if (!r.ok) return alert(`Error: ${d.error || 'Failed'}`);
+      status.textContent = `Imported $${d.amount.toFixed(2)} for ${g.api_key} (expense #${d.id}).`;
+      loadExpenses();
+    });
+    tbody.appendChild(tr);
+  });
+  tbl.style.display = tbody.children.length ? 'table' : 'none';
+});
+
 // Email parse
 document.getElementById('parseEmailBtn').addEventListener('click', async () => {
   const text = document.getElementById('emailText').value.trim();
@@ -989,6 +1066,17 @@ async function loadInvoices() {
   const today = new Date(); today.setHours(0,0,0,0);
   let outstanding = 0, overdue = 0, dueSoon = 0;
 
+  // Parse a 'YYYY-MM-DD' string as a local-midnight Date. Plain
+  // `new Date('YYYY-MM-DD')` parses as UTC midnight, which can land on the
+  // previous local day in negative-offset timezones — that off-by-one was
+  // the source of the days-until-due bug.
+  const parseLocalDate = (s) => {
+    if (!s) return null;
+    const [y, m, d] = String(s).slice(0, 10).split('-').map(Number);
+    if (!y || !m || !d) return null;
+    return new Date(y, m - 1, d);
+  };
+
   data.forEach(inv => {
     const tr = document.createElement('tr');
     tr.dataset.id = inv.id;
@@ -997,8 +1085,8 @@ async function loadInvoices() {
 
     // Due-date awareness
     let daysLabel = '—';
-    if (inv.due_date) {
-      const due = new Date(inv.due_date); due.setHours(0,0,0,0);
+    const due = parseLocalDate(inv.due_date);
+    if (due) {
       const diff = Math.round((due - today) / 86400000);
       if (!isPaid) {
         if (diff < 0) {
@@ -1028,7 +1116,8 @@ async function loadInvoices() {
       <td>${inv.invoice_number}</td>
       <td>${inv.client_name || '—'}</td>
       <td>${inv.invoice_date}</td>
-      <td>${inv.due_date || '—'}</td>
+      <td class="invoice-editable" data-field="date_sent" title="Double-click to edit">${inv.date_sent || '—'}</td>
+      <td class="invoice-editable" data-field="due_date" title="Double-click to edit">${inv.due_date || '—'}</td>
       <td class="days-cell">${daysLabel}</td>
       <td>$${total.toFixed(2)}</td>
       <td>${isPaid ? '<span class="status-badge billed">Paid</span>' : '<span class="status-badge">Unpaid</span>'}</td>
@@ -1041,6 +1130,27 @@ async function loadInvoices() {
       </td>
     `;
     tbody.appendChild(tr);
+  });
+
+  // Inline edit for date_sent / due_date — double-click prompt, PUT to API.
+  document.querySelectorAll('#invoicesTable .invoice-editable').forEach(cell => {
+    cell.addEventListener('dblclick', async ev => {
+      const field = ev.currentTarget.dataset.field;
+      const tr = ev.currentTarget.closest('tr');
+      const id = tr && tr.dataset.id;
+      if (!id) return;
+      const original = ev.currentTarget.textContent.trim();
+      const seed = original === '—' ? '' : original;
+      const next = prompt(`Edit ${field} (YYYY-MM-DD, leave blank to clear)`, seed);
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (trimmed && !/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+        alert('Please use YYYY-MM-DD format.');
+        return;
+      }
+      await api(`/api/invoices/${id}`, 'PUT', { [field]: trimmed });
+      loadInvoices();
+    });
   });
 
   // Update invoice summary cards
