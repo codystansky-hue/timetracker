@@ -76,6 +76,11 @@ def _merge_remote_entries(remote_db_path):
         lc = local_conn.cursor()
         rc = remote_conn.cursor()
 
+        # Snapshot local column names so inserts are never broken by a remote schema
+        # that is ahead of this machine's migrations (avoids "no column named X" deadlock).
+        lc.execute("PRAGMA table_info(entries)")
+        local_entry_cols = {row[1] for row in lc.fetchall()}
+
         # Ensure deleted_entries table exists in both DBs
         lc.execute('CREATE TABLE IF NOT EXISTS deleted_entries (id INTEGER PRIMARY KEY, deleted_at TEXT NOT NULL)')
         rc.execute('CREATE TABLE IF NOT EXISTS deleted_entries (id INTEGER PRIMARY KEY, deleted_at TEXT NOT NULL)')
@@ -110,7 +115,7 @@ def _merge_remote_entries(remote_db_path):
         # Merge remote entries into local, skipping deleted IDs
         rc.execute('SELECT * FROM entries ORDER BY id')
         for re_row in rc.fetchall():
-            re = dict(re_row)
+            re = {k: v for k, v in dict(re_row).items() if k in local_entry_cols}
             rid = re['id']
 
             if rid in local_deleted:
