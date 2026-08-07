@@ -25,6 +25,7 @@
         <span class="sync-dot"></span>
         <span class="sync-label">—</span>
       </div>
+      <button id="openClaudeBtn" class="nav-btn" title="Open Claude in a terminal in the repo (on the host machine)">Open Claude here</button>
       <button id="shutdownBtn" class="nav-btn" title="Stop the server">&#x23FB;</button>
     </nav>
 
@@ -34,14 +35,29 @@
       <div id="section-tracking" class="section">
         <div class="controls">
           <select id="clientSelect"><option value="">Select Client</option></select>
-          <input id="project" placeholder="Project name" />
+          <input id="project" placeholder="Project name" list="projectNames" autocomplete="off" />
           <input id="description" placeholder="Description" />
           <button id="startBtn">Start</button>
           <button id="stopBtn">Stop</button>
           <button id="exportBtn">Export CSV</button>
         </div>
 
-        
+        <!-- Shared by #project and #manualProject; filled by loadProjectNames(). -->
+        <datalist id="projectNames"></datalist>
+
+        <details class="manual-entry" style="margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px;">
+          <summary>+ Add manual entry</summary>
+          <div class="controls" style="margin-top: 10px;">
+            <select id="manualClient"><option value="">Select Client</option></select>
+            <input id="manualProject" placeholder="Project name" list="projectNames" autocomplete="off" />
+            <input id="manualDescription" placeholder="Description" />
+            <label class="manual-field">Start <input type="datetime-local" id="manualStart" /></label>
+            <label class="manual-field">Duration <input type="number" id="manualDuration" step="0.25" min="0" placeholder="hours" style="width:90px" /></label>
+            <label class="manual-field">End <input type="datetime-local" id="manualEnd" /></label>
+            <button id="manualAddBtn">Add Entry</button>
+          </div>
+        </details>
+
         <div class="controls filter-bar" style="margin-top: 15px; border-top: 1px solid #ddd; padding-top: 15px;">
           <strong>Filter Entries:</strong>
           <select id="filterClient"><option value="">All Clients</option></select>

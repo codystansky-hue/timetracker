@@ -535,8 +535,16 @@ def add_manual():
     end_ts = data.get('end_ts')
     if not start_ts or not end_ts:
         return jsonify({'error': 'start_ts and end_ts required (ISO format)'}), 400
-    start = datetime.fromisoformat(start_ts)
-    end = datetime.fromisoformat(end_ts)
+    try:
+        start = datetime.fromisoformat(start_ts).replace(tzinfo=None)
+        end = datetime.fromisoformat(end_ts).replace(tzinfo=None)
+    except ValueError:
+        return jsonify({'error': 'Invalid start_ts or end_ts (expected ISO format)'}), 400
+    if end <= start:
+        return jsonify({'error': 'end_ts must be after start_ts'}), 400
+    # Store as naive UTC ISO strings, consistent with timer and edited entries
+    start_ts = start.isoformat()
+    end_ts = end.isoformat()
     duration_min = int((end - start).total_seconds() // 60)
     conn = get_conn()
     cur = conn.cursor()
@@ -658,6 +666,27 @@ def projects_summary():
         row['billed_value'] = round(row['billed_value'], 2)
     conn.close()
     return jsonify(rows)
+
+@app.route('/api/projects/names')
+def project_names():
+    """Distinct project names, most recently used first.
+
+    Feeds the datalist on the project inputs so existing names get picked from a
+    list instead of retyped — retyping is how 'Griffon'/'griffon'/'ptero ' drift
+    apart into separate projects.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute('''
+        SELECT project, MAX(start_ts) AS last_used
+        FROM entries
+        WHERE project IS NOT NULL AND TRIM(project) <> ''
+        GROUP BY project
+        ORDER BY last_used DESC
+    ''')
+    names = [r['project'] for r in cur.fetchall()]
+    conn.close()
+    return jsonify(names)
 
 @app.route('/api/projects/target', methods=['POST'])
 def update_project_target():
@@ -2971,6 +3000,23 @@ def serve_upload(filename):
 @app.route('/sw.js')
 def service_worker():
     return send_file(str(APP_ROOT / 'static' / 'sw.js'), mimetype='application/javascript')
+
+
+@app.route('/api/open-claude', methods=['POST'])
+def open_claude():
+    """Open a new terminal window running `claude` in the repo directory.
+
+    The terminal opens on the machine running this server (the host), not on a
+    remote device viewing the app over the LAN. `start` is a cmd builtin, so
+    shell=True runs it via cmd.exe; `cmd /k` keeps the window open after claude
+    exits.
+    """
+    try:
+        subprocess.Popen('start "Claude Code" cmd /k claude',
+                         cwd=str(APP_ROOT), shell=True)
+        return jsonify({'status': 'launched'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'error': str(e)}), 500
 
 
 @app.route('/api/shutdown', methods=['POST'])

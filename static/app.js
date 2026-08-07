@@ -293,7 +293,20 @@ async function loadClients() {
   const lastClient = localStorage.getItem('lastClient');
   if (lastClient) select.value = lastClient;
 
-  
+  // Manual entry client dropdown
+  const manualClient = document.getElementById('manualClient');
+  if (manualClient) {
+    const currentManual = manualClient.value;
+    manualClient.innerHTML = '<option value="">Select Client</option>';
+    clients.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      manualClient.appendChild(opt);
+    });
+    manualClient.value = currentManual || lastClient || '';
+  }
+
   const filterClient = document.getElementById('filterClient');
   if (filterClient) {
     const currentFilterClient = filterClient.value;
@@ -949,6 +962,75 @@ document.getElementById('stopBtn').addEventListener('click', async () => {
   loadAll();
 });
 
+// ── Manual entry: today-defaulted, duration-linked fields ────────────────────
+const mStart = document.getElementById('manualStart');
+const mDur = document.getElementById('manualDuration');
+const mEnd = document.getElementById('manualEnd');
+
+// Current local time as a `YYYY-MM-DDTHH:MM` value for datetime-local inputs.
+function nowLocalInput() {
+  const d = new Date();
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+function toLocalInput(date) {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+}
+
+// Start defaults to today (current local time); duration/end left for the user.
+function resetManualEntry() {
+  mStart.value = nowLocalInput();
+  mDur.value = '';
+  mEnd.value = '';
+}
+resetManualEntry();
+
+// Duration (hours) drives End = Start + duration.
+function endFromDuration() {
+  const hrs = parseFloat(mDur.value);
+  if (!mStart.value || isNaN(hrs) || hrs <= 0) return;
+  mEnd.value = toLocalInput(new Date(new Date(mStart.value).getTime() + hrs * 3600000));
+}
+// Start/End changes keep the duration field in sync.
+function durationFromTimes() {
+  if (!mStart.value || !mEnd.value) return;
+  const hrs = (new Date(mEnd.value) - new Date(mStart.value)) / 3600000;
+  if (hrs > 0) mDur.value = Math.round(hrs * 100) / 100;
+}
+mDur.addEventListener('input', endFromDuration);
+mStart.addEventListener('change', () => {
+  if (parseFloat(mDur.value) > 0) endFromDuration();
+  else durationFromTimes();
+});
+mEnd.addEventListener('change', durationFromTimes);
+
+document.getElementById('manualAddBtn').addEventListener('click', async () => {
+  const client_id = document.getElementById('manualClient').value;
+  const project = document.getElementById('manualProject').value || 'Default';
+  const description = document.getElementById('manualDescription').value || '';
+  const startVal = mStart.value;
+  if (!startVal) return alert('Start time is required');
+  // datetime-local values are local time; convert to UTC ISO like inline edits do
+  const start_ts = new Date(startVal).toISOString();
+  let end_ts;
+  const hrs = parseFloat(mDur.value);
+  if (mEnd.value) {
+    end_ts = new Date(mEnd.value).toISOString();
+  } else if (hrs > 0) {
+    end_ts = new Date(new Date(startVal).getTime() + hrs * 3600000).toISOString();
+  } else {
+    return alert('Enter an end time or a duration');
+  }
+  if (new Date(end_ts) <= new Date(start_ts)) return alert('End time must be after start time');
+  localStorage.setItem('lastProject', project);
+  localStorage.setItem('lastClient', client_id);
+  const res = await api('/api/add', 'POST', { client_id, project, description, start_ts, end_ts });
+  if (res && res.error) return alert(res.error);
+  document.getElementById('manualProject').value = '';
+  document.getElementById('manualDescription').value = '';
+  resetManualEntry();
+  loadAll();
+});
+
 document.getElementById('exportBtn').addEventListener('click', () => {
   window.location = '/api/export';
 });
@@ -971,10 +1053,25 @@ document.getElementById('project').value = localStorage.getItem('lastProject') |
 
 // ── Load all ──────────────────────────────────────────────────────────────────
 
+// Existing project names, most recent first, offered as suggestions on both
+// project inputs so names get reused rather than retyped-and-drifted.
+async function loadProjectNames() {
+  const list = document.getElementById('projectNames');
+  if (!list) return;
+  const names = await api('/api/projects/names');
+  list.innerHTML = '';
+  names.forEach(n => {
+    const opt = document.createElement('option');
+    opt.value = n;
+    list.appendChild(opt);
+  });
+}
+
 async function loadAll() {
   await loadClients();
   loadEntries();
   loadProjectsSummary();
+  loadProjectNames();
   loadExpenses();
   loadInvoices();
 }
@@ -1179,6 +1276,25 @@ async function loadInvoices() {
 }
 
 // ── Shutdown ─────────────────────────────────────────────────────────────────
+
+document.getElementById('openClaudeBtn').addEventListener('click', async () => {
+  const btn = document.getElementById('openClaudeBtn');
+  const orig = btn.textContent;
+  btn.disabled = true;
+  try {
+    const r = await api('/api/open-claude', 'POST');
+    if (r.status === 'launched') {
+      btn.textContent = 'Opened ✓';
+    } else {
+      btn.textContent = 'Failed';
+      alert('Could not open Claude: ' + (r.error || 'unknown error'));
+    }
+  } catch (e) {
+    btn.textContent = 'Failed';
+    alert('Could not open Claude: ' + e);
+  }
+  setTimeout(() => { btn.textContent = orig; btn.disabled = false; }, 2000);
+});
 
 document.getElementById('shutdownBtn').addEventListener('click', async () => {
   if (!confirm('Stop the Time Tracker server?')) return;

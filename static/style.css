@@ -399,6 +399,37 @@ td {
     white-space: nowrap;
 }
 
+.manual-entry {
+    background: var(--bg);
+    border-radius: 8px;
+    margin-bottom: 24px;
+}
+
+.manual-entry > summary {
+    cursor: pointer;
+    color: var(--accent);
+    font-size: 0.9rem;
+    user-select: none;
+    list-style: none;
+}
+
+.manual-entry > summary::-webkit-details-marker {
+    display: none;
+}
+
+.manual-entry .controls {
+    margin-bottom: 0;
+}
+
+.manual-field {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--fg);
+    font-size: 0.9rem;
+    white-space: nowrap;
+}
+
 #emailText {
     width: 100%;
     min-height: 130px;
