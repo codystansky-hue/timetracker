@@ -5,6 +5,11 @@ const PAGE_SIZE = 20;
 let expenseModalState = {};
 let invoiceClientId = null;
 let receiptQueue = [];      // pending crops waiting for review
+let entriesViewMode = 'detail'; // 'detail' | 'weekly'
+// Last computed Ajera rollup (shared by render / copy / export)
+let weeklySummaryState = { rows: [], weeks: [], skippedActive: 0, clientShares: [] };
+// Week totals + client share across all clients (same date/status filters)
+let weeklyHoursRecord = { weeks: [], totalHours: 0, clientShares: [], loaded: false };
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
@@ -193,9 +198,13 @@ function isoDate(d) {
 // Compute [start, end] dates for a named preset. Weeks are Monday–Sunday.
 function presetRange(preset) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
+  const dayOfWeek = (today.getDay() + 6) % 7; // Mon=0 … Sun=6
+  const thisMonday = new Date(today); thisMonday.setDate(today.getDate() - dayOfWeek);
+  if (preset === 'this_week') {
+    const thisSunday = new Date(thisMonday); thisSunday.setDate(thisMonday.getDate() + 6);
+    return [isoDate(thisMonday), isoDate(thisSunday)];
+  }
   if (preset === 'last_week') {
-    const dayOfWeek = (today.getDay() + 6) % 7; // Mon=0 … Sun=6
-    const thisMonday = new Date(today); thisMonday.setDate(today.getDate() - dayOfWeek);
     const lastMonday = new Date(thisMonday); lastMonday.setDate(thisMonday.getDate() - 7);
     const lastSunday = new Date(lastMonday); lastSunday.setDate(lastMonday.getDate() + 6);
     return [isoDate(lastMonday), isoDate(lastSunday)];
@@ -206,6 +215,524 @@ function presetRange(preset) {
     return [isoDate(first), isoDate(last)];
   }
   return null;
+}
+
+// ── Weekly summary (Ajera rollup) ────────────────────────────────────────────
+// Merge filtered entries by (client, project, local calendar day) for Ajera
+// timesheet entry. Read-only; does not change the DB.
+
+function parseEntryLocalDate(isoStr) {
+  if (!isoStr) return null;
+  const hastz = isoStr.endsWith('Z') || /[+-]\d{2}:\d{2}$/.test(isoStr);
+  const d = new Date(hastz ? isoStr : isoStr + 'Z');
+  if (isNaN(d)) return null;
+  return isoDate(d); // local YYYY-MM-DD
+}
+
+// Monday of the Mon–Sun week containing YYYY-MM-DD (local calendar date string).
+function weekMondayOf(dateStr) {
+  const [y, m, d] = dateStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  const monOffset = (dt.getDay() + 6) % 7;
+  dt.setDate(dt.getDate() - monOffset);
+  return isoDate(dt);
+}
+
+function weekSundayOf(mondayStr) {
+  const [y, m, d] = mondayStr.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  dt.setDate(dt.getDate() + 6);
+  return isoDate(dt);
+}
+
+// Quarter-hour decimal hours — same rounding as fmtDuration / filtered totals.
+function minutesToAjeraHours(minutes) {
+  return Math.round((minutes || 0) / 15) * 0.25;
+}
+
+function formatAjeraHours(hours) {
+  if (hours % 1 === 0) return String(hours);
+  return hours.toFixed(2);
+}
+
+const DESC_MAX_LEN = 240;
+
+// Aggregate minutes by client → hours + percent share of a total.
+function clientSharesFromMinutes(byClientMin) {
+  const totalMin = Array.from(byClientMin.values()).reduce((s, v) => s + (v.duration_min || 0), 0);
+  const totalHours = minutesToAjeraHours(totalMin);
+  const shares = Array.from(byClientMin.values())
+    .map(c => {
+      const hours = minutesToAjeraHours(c.duration_min);
+      const pct = totalMin > 0 ? Math.round((c.duration_min / totalMin) * 1000) / 10 : 0;
+      return {
+        client_id: c.client_id,
+        client: c.client || '(No client)',
+        duration_min: c.duration_min,
+        hours,
+        pct,
+      };
+    })
+    .sort((a, b) => b.duration_min - a.duration_min || (a.client || '').localeCompare(b.client || ''));
+  return { totalMin, totalHours, shares };
+}
+
+function accumulateClientMinutes(map, clientId, clientName, durationMin) {
+  const key = clientId == null || clientId === '' ? 'none' : String(clientId);
+  let row = map.get(key);
+  if (!row) {
+    row = {
+      client_id: clientId,
+      client: clientName || clients.find(c => c.id == clientId)?.name || '(No client)',
+      duration_min: 0,
+    };
+    map.set(key, row);
+  }
+  row.duration_min += durationMin || 0;
+}
+
+function formatSharePct(pct) {
+  if (pct % 1 === 0) return String(pct);
+  return pct.toFixed(1);
+}
+
+function renderClientShareChips(shares) {
+  if (!shares.length) return '<span class="weekly-share-empty">—</span>';
+  return shares.map(s =>
+    `<span class="weekly-share-chip" title="${escapeHtml(s.client)}: ${formatAjeraHours(s.hours)}h (${formatSharePct(s.pct)}%)">
+      <span class="weekly-share-name">${escapeHtml(s.client)}</span>
+      <span class="weekly-share-hours">${formatAjeraHours(s.hours)}h</span>
+      <span class="weekly-share-pct">${formatSharePct(s.pct)}%</span>
+    </span>`
+  ).join('');
+}
+
+function renderClientShareBar(shares) {
+  if (!shares.length) return '';
+  const segments = shares.map(s => {
+    const w = Math.max(s.pct, s.hours > 0 ? 0.5 : 0);
+    return `<span class="weekly-share-seg" style="flex:${w}" title="${escapeHtml(s.client)}: ${formatAjeraHours(s.hours)}h (${formatSharePct(s.pct)}%)"></span>`;
+  }).join('');
+  return `<div class="weekly-share-bar" role="img" aria-label="Client hour share">${segments}</div>`;
+}
+
+function buildWeeklySummary(entries) {
+  const groups = new Map();
+  let skippedActive = 0;
+
+  for (const e of entries) {
+    // Skip still-running / no-duration rows from the Ajera rollup.
+    if (!e.end_ts || !e.duration_min) {
+      if (!e.end_ts) skippedActive++;
+      continue;
+    }
+    const localDate = parseEntryLocalDate(e.start_ts);
+    if (!localDate) continue;
+    const project = (e.project || 'Default').trim() || 'Default';
+    const key = `${e.client_id ?? ''}||${project}||${localDate}`;
+    let g = groups.get(key);
+    if (!g) {
+      g = {
+        client_id: e.client_id,
+        project,
+        date: localDate,
+        duration_min: 0,
+        descriptions: [],
+        descSeen: new Set(),
+        entryCount: 0,
+      };
+      groups.set(key, g);
+    }
+    g.duration_min += e.duration_min || 0;
+    g.entryCount += 1;
+    const desc = (e.description || '').trim();
+    if (desc && !g.descSeen.has(desc)) {
+      g.descSeen.add(desc);
+      g.descriptions.push(desc);
+    }
+  }
+
+  const rows = Array.from(groups.values()).map(g => {
+    let description = g.descriptions.join('; ');
+    if (description.length > DESC_MAX_LEN) {
+      description = description.slice(0, DESC_MAX_LEN - 1) + '…';
+    }
+    const clientName = clients.find(c => c.id == g.client_id)?.name || '';
+    return {
+      date: g.date,
+      client_id: g.client_id,
+      client: clientName,
+      project: g.project,
+      hours: minutesToAjeraHours(g.duration_min),
+      duration_min: g.duration_min,
+      description,
+      entryCount: g.entryCount,
+      weekMonday: weekMondayOf(g.date),
+    };
+  });
+
+  // Newest first (recent weeks/days at the top for Ajera catch-up).
+  rows.sort((a, b) => {
+    if (a.date !== b.date) return a.date > b.date ? -1 : 1;
+    const cn = (a.client || '').localeCompare(b.client || '');
+    if (cn) return cn;
+    return (a.project || '').localeCompare(b.project || '');
+  });
+
+  const weekMap = new Map();
+  for (const r of rows) {
+    if (!weekMap.has(r.weekMonday)) weekMap.set(r.weekMonday, []);
+    weekMap.get(r.weekMonday).push(r);
+  }
+  const weeks = Array.from(weekMap.entries())
+    .sort((a, b) => a[0] > b[0] ? -1 : 1)
+    .map(([monday, weekRows]) => {
+      const byClient = new Map();
+      for (const r of weekRows) {
+        accumulateClientMinutes(byClient, r.client_id, r.client, r.duration_min);
+      }
+      const share = clientSharesFromMinutes(byClient);
+      return {
+        monday,
+        sunday: weekSundayOf(monday),
+        rows: weekRows,
+        totalHours: share.totalHours,
+        clientShares: share.shares,
+      };
+    });
+
+  const overallByClient = new Map();
+  for (const r of rows) {
+    accumulateClientMinutes(overallByClient, r.client_id, r.client, r.duration_min);
+  }
+  const overall = clientSharesFromMinutes(overallByClient);
+
+  return { rows, weeks, skippedActive, clientShares: overall.shares, totalHours: overall.totalHours };
+}
+
+// Week totals + client share for a set of raw entries (all clients in range).
+function buildWeeklyHoursRecord(entries) {
+  const weekClientMin = new Map(); // monday -> Map(clientKey -> {client_id, client, duration_min})
+  const overallByClient = new Map();
+
+  for (const e of entries) {
+    if (!e.end_ts || !e.duration_min) continue;
+    const localDate = parseEntryLocalDate(e.start_ts);
+    if (!localDate) continue;
+    const monday = weekMondayOf(localDate);
+    if (!weekClientMin.has(monday)) weekClientMin.set(monday, new Map());
+    const clientName = clients.find(c => c.id == e.client_id)?.name || '';
+    accumulateClientMinutes(weekClientMin.get(monday), e.client_id, clientName, e.duration_min);
+    accumulateClientMinutes(overallByClient, e.client_id, clientName, e.duration_min);
+  }
+
+  const weeks = Array.from(weekClientMin.entries())
+    .sort((a, b) => a[0] > b[0] ? -1 : 1)
+    .map(([monday, byClient]) => {
+      const share = clientSharesFromMinutes(byClient);
+      return {
+        monday,
+        sunday: weekSundayOf(monday),
+        totalHours: share.totalHours,
+        clientShares: share.shares,
+      };
+    });
+
+  const overall = clientSharesFromMinutes(overallByClient);
+  return {
+    weeks,
+    totalHours: overall.totalHours,
+    clientShares: overall.shares,
+    loaded: true,
+  };
+}
+
+async function loadWeeklyHoursRecord() {
+  const filterStartDate = document.getElementById('filterStartDate').value;
+  const filterEndDate = document.getElementById('filterEndDate').value;
+  const filterStatus = document.getElementById('filterStatus').value;
+  // All clients — share is only meaningful across the full roster for the date range.
+  const params = new URLSearchParams();
+  if (filterStartDate) params.append('start_date', filterStartDate);
+  if (filterEndDate) params.append('end_date', filterEndDate);
+  if (filterStatus && filterStatus !== 'all') params.append('status', filterStatus);
+  const entries = await api('/api/entries?' + params.toString());
+  weeklyHoursRecord = buildWeeklyHoursRecord(Array.isArray(entries) ? entries : []);
+  return weeklyHoursRecord;
+}
+
+function renderWeeklyHoursRecord() {
+  const el = document.getElementById('weeklyHoursRecord');
+  if (!el) return;
+
+  const rec = weeklyHoursRecord;
+  if (!rec.loaded || !rec.weeks.length) {
+    el.style.display = 'none';
+    el.innerHTML = '';
+    return;
+  }
+
+  const overallChips = renderClientShareChips(rec.clientShares);
+  const overallBar = renderClientShareBar(rec.clientShares);
+
+  let weekRowsHtml = '';
+  for (const w of rec.weeks) {
+    weekRowsHtml += `
+      <tr>
+        <td class="weekly-date">${w.monday} – ${w.sunday}</td>
+        <td class="weekly-hours">${formatAjeraHours(w.totalHours)}h</td>
+        <td class="weekly-share-cell">
+          ${renderClientShareBar(w.clientShares)}
+          <div class="weekly-share-chips">${renderClientShareChips(w.clientShares)}</div>
+        </td>
+      </tr>`;
+  }
+
+  el.innerHTML = `
+    <div class="weekly-record-header">
+      <div class="weekly-record-title">
+        <strong>Weekly hours record</strong>
+        <span class="weekly-block-total">${formatAjeraHours(rec.totalHours)}h total</span>
+        <span class="muted">all clients · same date/status filters</span>
+      </div>
+      <div class="weekly-record-overall">
+        ${overallBar}
+        <div class="weekly-share-chips">${overallChips}</div>
+      </div>
+    </div>
+    <table class="weekly-table weekly-record-table">
+      <thead>
+        <tr>
+          <th>Week</th>
+          <th>Total</th>
+          <th>Client share</th>
+        </tr>
+      </thead>
+      <tbody>${weekRowsHtml}</tbody>
+    </table>`;
+  el.style.display = '';
+}
+
+function rowsToTsv(rows) {
+  const header = ['Date', 'Client', 'Project', 'Hours', 'Description'];
+  const lines = [header.join('\t')];
+  for (const r of rows) {
+    // Tabs/newlines in fields would break TSV; collapse them.
+    const cells = [
+      r.date,
+      r.client,
+      r.project,
+      formatAjeraHours(r.hours),
+      (r.description || '').replace(/[\t\r\n]+/g, ' '),
+    ];
+    lines.push(cells.join('\t'));
+  }
+  return lines.join('\n');
+}
+
+function rowsToCsv(rows) {
+  const esc = (v) => {
+    const s = String(v ?? '');
+    if (/[",\r\n]/.test(s)) return `"${s.replace(/"/g, '""')}"`;
+    return s;
+  };
+  const header = ['Date', 'Client', 'Project', 'Hours', 'Description', 'EntryCount'];
+  const lines = [header.join(',')];
+  for (const r of rows) {
+    lines.push([
+      esc(r.date),
+      esc(r.client),
+      esc(r.project),
+      esc(formatAjeraHours(r.hours)),
+      esc(r.description),
+      esc(r.entryCount),
+    ].join(','));
+  }
+  return lines.join('\n');
+}
+
+async function copyText(text, btn) {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (btn) {
+      const orig = btn.textContent;
+      btn.textContent = 'Copied ✓';
+      setTimeout(() => { btn.textContent = orig; }, 1500);
+    }
+  } catch (err) {
+    // Fallback for non-secure contexts
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.left = '-9999px';
+    document.body.appendChild(ta);
+    ta.select();
+    try {
+      document.execCommand('copy');
+      if (btn) {
+        const orig = btn.textContent;
+        btn.textContent = 'Copied ✓';
+        setTimeout(() => { btn.textContent = orig; }, 1500);
+      }
+    } catch (e2) {
+      alert('Could not copy to clipboard');
+    }
+    document.body.removeChild(ta);
+  }
+}
+
+async function renderWeeklySummary() {
+  const root = document.getElementById('weeklySummaryRoot');
+  const noteEl = document.getElementById('weeklySummaryNote');
+  const grandEl = document.getElementById('weeklySummaryGrand');
+  if (!root) return;
+
+  const state = buildWeeklySummary(allEntries);
+  weeklySummaryState = state;
+
+  // Hours record always spans all clients for the date/status filters.
+  try {
+    await loadWeeklyHoursRecord();
+  } catch (err) {
+    console.warn('Weekly hours record failed', err);
+    weeklyHoursRecord = { weeks: [], totalHours: 0, clientShares: [], loaded: false };
+  }
+  renderWeeklyHoursRecord();
+
+  if (state.skippedActive > 0) {
+    noteEl.textContent = `${state.skippedActive} running entr${state.skippedActive === 1 ? 'y' : 'ies'} excluded from the rollup.`;
+    noteEl.style.display = '';
+  } else {
+    noteEl.textContent = '';
+    noteEl.style.display = 'none';
+  }
+
+  if (!state.rows.length) {
+    grandEl.style.display = 'none';
+    root.innerHTML = '<p class="weekly-empty">No completed entries for this client filter. Adjust the client filter or date range.</p>';
+    return;
+  }
+
+  const grandHours = state.totalHours ?? minutesToAjeraHours(state.rows.reduce((s, r) => s + r.duration_min, 0));
+  const shareBits = (state.clientShares || []).map(s =>
+    `${escapeHtml(s.client)} ${formatAjeraHours(s.hours)}h (${formatSharePct(s.pct)}%)`
+  ).join(' · ');
+  grandEl.innerHTML = `<span class="ft-label">Ajera rollup</span>
+    <span class="ft-item"><strong>${state.rows.length}</strong> day-project lines</span>
+    <span class="ft-item"><strong>${formatAjeraHours(grandHours)}h</strong></span>
+    <span class="ft-item muted">from ${state.rows.reduce((s, r) => s + r.entryCount, 0)} raw entries</span>
+    ${shareBits ? `<span class="ft-item muted weekly-grand-share">${shareBits}</span>` : ''}`;
+  grandEl.style.display = '';
+
+  root.innerHTML = '';
+  for (const week of state.weeks) {
+    const block = document.createElement('div');
+    block.className = 'weekly-block';
+    block.dataset.weekMonday = week.monday;
+
+    const header = document.createElement('div');
+    header.className = 'weekly-block-header';
+    header.innerHTML = `
+      <div class="weekly-block-title">
+        <strong>Week of ${week.monday} – ${week.sunday}</strong>
+        <span class="weekly-block-total">${formatAjeraHours(week.totalHours)}h</span>
+      </div>
+      <button type="button" class="btn-secondary weekly-copy-week" data-week="${week.monday}">Copy week TSV</button>
+    `;
+    block.appendChild(header);
+
+    if (week.clientShares && week.clientShares.length > 1) {
+      const shareRow = document.createElement('div');
+      shareRow.className = 'weekly-block-share';
+      shareRow.innerHTML = `${renderClientShareBar(week.clientShares)}<div class="weekly-share-chips">${renderClientShareChips(week.clientShares)}</div>`;
+      block.appendChild(shareRow);
+    }
+
+    const table = document.createElement('table');
+    table.className = 'weekly-table';
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>Date</th>
+          <th>Client</th>
+          <th>Project</th>
+          <th>Hours</th>
+          <th>Description</th>
+          <th>Sources</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tbody = table.querySelector('tbody');
+    for (const r of week.rows) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="weekly-date">${r.date}</td>
+        <td>${escapeHtml(r.client)}</td>
+        <td>${escapeHtml(r.project)}</td>
+        <td class="weekly-hours">${formatAjeraHours(r.hours)}</td>
+        <td class="weekly-desc">${escapeHtml(r.description)}</td>
+        <td class="weekly-src">${r.entryCount} entr${r.entryCount === 1 ? 'y' : 'ies'}</td>
+      `;
+      tbody.appendChild(tr);
+    }
+    block.appendChild(table);
+    root.appendChild(block);
+  }
+
+  root.querySelectorAll('.weekly-copy-week').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const monday = btn.dataset.week;
+      const week = weeklySummaryState.weeks.find(w => w.monday === monday);
+      if (!week) return;
+      copyText(rowsToTsv(week.rows), btn);
+    });
+  });
+}
+
+function escapeHtml(s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// Ajera is only used for Flight House Engineering.
+function findAjeraClientId() {
+  const match = clients.find(c => /flight\s*house/i.test(c.name || ''));
+  return match ? String(match.id) : null;
+}
+
+function syncWeeklyClientFilter(clientId) {
+  const weeklySel = document.getElementById('weeklyFilterClient');
+  if (weeklySel) weeklySel.value = clientId || '';
+}
+
+function setEntriesView(mode) {
+  entriesViewMode = mode === 'weekly' ? 'weekly' : 'detail';
+  const detail = document.getElementById('entriesDetailView');
+  const weekly = document.getElementById('entriesWeeklyView');
+  if (detail) detail.style.display = entriesViewMode === 'detail' ? '' : 'none';
+  if (weekly) weekly.style.display = entriesViewMode === 'weekly' ? '' : 'none';
+  document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+    const on = btn.dataset.view === entriesViewMode;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  if (entriesViewMode === 'weekly') {
+    const filterClient = document.getElementById('filterClient');
+    const ajeraId = findAjeraClientId();
+    // Default weekly Ajera summary to Flight House when no client is selected.
+    if (ajeraId && filterClient && !filterClient.value) {
+      filterClient.value = ajeraId;
+      syncWeeklyClientFilter(ajeraId);
+      loadEntries();
+      return;
+    }
+    syncWeeklyClientFilter(filterClient?.value || '');
+    renderWeeklySummary();
+  }
 }
 
 function renderFilteredTotals() {
@@ -246,8 +773,10 @@ async function loadEntries() {
 
   allEntries = await api(url + params.toString());
   currentPage = 1;
+  syncWeeklyClientFilter(filterClientId);
   renderEntriesPage();
   renderFilteredTotals();
+  if (entriesViewMode === 'weekly') renderWeeklySummary();
 }
 
 document.getElementById('applyFilterBtn').addEventListener('click', loadEntries);
@@ -257,6 +786,12 @@ document.getElementById('clearFilterBtn').addEventListener('click', () => {
   document.getElementById('filterStartDate').value = '';
   document.getElementById('filterEndDate').value = '';
   document.getElementById('filterStatus').value = 'all';
+  syncWeeklyClientFilter('');
+  loadEntries();
+});
+
+document.getElementById('weeklyFilterClient')?.addEventListener('change', (ev) => {
+  document.getElementById('filterClient').value = ev.target.value;
   loadEntries();
 });
 
@@ -266,6 +801,31 @@ document.getElementById('filterPreset').addEventListener('change', ev => {
   document.getElementById('filterStartDate').value = range[0];
   document.getElementById('filterEndDate').value = range[1];
   loadEntries();
+});
+
+document.querySelectorAll('.view-toggle-btn').forEach(btn => {
+  btn.addEventListener('click', () => setEntriesView(btn.dataset.view));
+});
+
+document.getElementById('weeklyCopyAllBtn')?.addEventListener('click', (ev) => {
+  const rows = weeklySummaryState.rows;
+  if (!rows.length) { alert('Nothing to copy — no completed entries in this filter.'); return; }
+  copyText(rowsToTsv(rows), ev.currentTarget);
+});
+
+document.getElementById('weeklyExportCsvBtn')?.addEventListener('click', () => {
+  const rows = weeklySummaryState.rows;
+  if (!rows.length) { alert('Nothing to export — no completed entries in this filter.'); return; }
+  const blob = new Blob([rowsToCsv(rows)], { type: 'text/csv;charset=utf-8' });
+  const a = document.createElement('a');
+  const start = document.getElementById('filterStartDate')?.value || 'all';
+  const end = document.getElementById('filterEndDate')?.value || 'all';
+  a.href = URL.createObjectURL(blob);
+  a.download = `timesheet-summary_${start}_${end}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  URL.revokeObjectURL(a.href);
+  a.remove();
 });
 
 document.getElementById('prevPage').addEventListener('click', () => {
@@ -318,6 +878,20 @@ async function loadClients() {
       filterClient.appendChild(opt);
     });
     if (currentFilterClient) filterClient.value = currentFilterClient;
+  }
+
+  // Weekly summary client filter (kept in sync with the main Entries filter)
+  const weeklyFilterClient = document.getElementById('weeklyFilterClient');
+  if (weeklyFilterClient) {
+    const currentWeekly = weeklyFilterClient.value || filterClient?.value || '';
+    weeklyFilterClient.innerHTML = '<option value="">All Clients</option>';
+    clients.forEach(c => {
+      const opt = document.createElement('option');
+      opt.value = c.id;
+      opt.textContent = c.name;
+      weeklyFilterClient.appendChild(opt);
+    });
+    if (currentWeekly) weeklyFilterClient.value = currentWeekly;
   }
 
   // Expense client dropdowns
